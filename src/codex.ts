@@ -1,0 +1,343 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
+
+type InvocationKind = "explicit" | "agent" | "inferred";
+type Source = "global" | "system" | "project" | "plugin";
+
+type Skill = {
+  aliases: Set<string>;
+  available: boolean;
+  byInvocationKind: Record<InvocationKind, number>;
+  id: string;
+  name: string;
+  paths: Set<string>;
+  source: Source | "history";
+  uses: Map<string, InvocationKind>;
+};
+
+export type CodexSkill = {
+  available: boolean;
+  byAgent: { codex: number };
+  byInvocationKind: Record<InvocationKind, number>;
+  id: string;
+  members: ["codex"];
+  name: string;
+  source: Source | "history";
+  total: number;
+};
+
+export type CodexScan = { skills: CodexSkill[]; warnings: string[] };
+
+const precedence: Record<InvocationKind, number> = { inferred: 1, agent: 2, explicit: 3 };
+
+function opaqueId(value: string): string {
+  return `codex-${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
+}
+
+function skillName(path: string): string {
+  const content = readFileSync(path, "utf8");
+  return content.match(/^name:\s*["']?([^\n"']+)/m)?.[1].trim() || basename(resolve(path, ".."));
+}
+
+function skillFiles(root: string, excluded = new Set<string>()): string[] {
+  if (!existsSync(root)) return [];
+  const files: string[] = [];
+  const visited = new Set<string>();
+  const visit = (directory: string): void => {
+    const canonicalDirectory = realpathSync(directory);
+    if (visited.has(canonicalDirectory) || excluded.has(canonicalDirectory)) return;
+    visited.add(canonicalDirectory);
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory() || (entry.isSymbolicLink() && existsSync(path) && !entry.isFile())) visit(path);
+      else if (entry.isFile() && entry.name === "SKILL.md") files.push(path);
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function addAvailableSkill(skills: Map<string, Skill>, path: string, source: Source, namespace?: string): void {
+  const canonical = realpathSync(path);
+  const localName = skillName(canonical);
+  const name = namespace ? `${namespace}:${localName}` : localName;
+  const id = opaqueId(canonical);
+  const skill = skills.get(id) ?? {
+    aliases: new Set<string>(), available: true,
+    byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id, name,
+    paths: new Set<string>(), source, uses: new Map<string, InvocationKind>()
+  };
+  skill.aliases.add(name);
+  skill.aliases.add(localName);
+  skill.paths.add(path);
+  skill.paths.add(canonical);
+  skills.set(id, skill);
+}
+
+function recordUse(skill: Skill, turn: string, kind: InvocationKind): void {
+  const current = skill.uses.get(turn);
+  if (!current || precedence[kind] > precedence[current]) skill.uses.set(turn, kind);
+}
+
+function addUse(skills: Map<string, Skill>, name: string, turn: string, kind: InvocationKind): void {
+  const matches = [...skills.values()].filter((skill) => skill.aliases.has(name));
+  const sourceRank: Record<Skill["source"], number> = { global: 4, project: 3, system: 2, plugin: 1, history: 0 };
+  const bestRank = Math.max(...matches.map((match) => sourceRank[match.source]));
+  const best = matches.filter((skill) => sourceRank[skill.source] === bestRank);
+  const skill = best.length === 1 ? best[0] : (() => {
+    const id = opaqueId(`history:${name}`);
+    const history = skills.get(id) ?? {
+      aliases: new Set([name]), available: false,
+      byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
+      name: /^[\w:-]+$/.test(name) ? name : `unknown-${id.slice(-8)}`,
+      paths: new Set<string>(), source: "history" as const, uses: new Map<string, InvocationKind>()
+    };
+    skills.set(id, history);
+    return history;
+  })();
+  recordUse(skill, turn, kind);
+}
+
+function addHistoricalUse(
+  skills: Map<string, Skill>,
+  path: string,
+  codexHome: string,
+  pluginRoots: Map<string, string>,
+  turn: string
+): void {
+  const canonical = existsSync(path) ? realpathSync(path) : path;
+  const localName = existsSync(canonical) ? skillName(canonical) : basename(resolve(canonical, ".."));
+  const cacheRoot = join(codexHome, "plugins", "cache");
+  const cachePath = existsSync(cacheRoot) ? realpathSync(cacheRoot) : cacheRoot;
+  const cacheSegments = relative(cachePath, canonical).split(sep);
+  const cachedPluginName = cacheSegments[0] !== ".." && cacheSegments[3] === "skills" ? cacheSegments[1] : undefined;
+  const authoritativePluginName = [...pluginRoots].find(([root]) => canonical.startsWith(`${root}${sep}`))?.[1];
+  const pluginName = authoritativePluginName ?? cachedPluginName;
+  const name = pluginName ? `${pluginName}:${localName}` : localName;
+  const id = opaqueId(`history-path:${canonical}`);
+  const skill = skills.get(id) ?? {
+    aliases: new Set([name, localName]), available: false,
+    byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id, name,
+    paths: new Set([path, canonical]), source: "history" as const, uses: new Map<string, InvocationKind>()
+  };
+  skills.set(id, skill);
+  recordUse(skill, turn, "inferred");
+}
+
+function projectRoots(cwd: string): string[] {
+  let root = resolve(cwd);
+  for (;;) {
+    if (existsSync(join(root, ".git"))) break;
+    const parent = resolve(root, "..");
+    if (parent === root) return [join(resolve(cwd), ".agents", "skills")];
+    root = parent;
+  }
+  const roots: string[] = [];
+  for (let directory = resolve(cwd); ; directory = resolve(directory, "..")) {
+    roots.push(join(directory, ".agents", "skills"));
+    if (directory === root) return roots;
+  }
+}
+
+function parsePluginSkills(skills: Map<string, Skill>, warnings: string[], codexHome: string): Map<string, string> {
+  const pluginRoots = new Map<string, string>();
+  let inventory: unknown;
+  try {
+    inventory = JSON.parse(execFileSync("codex", ["plugin", "list", "--json"], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"]
+    }));
+  } catch {
+    warnings.push("Codex plugin inventory is unavailable.");
+    return pluginRoots;
+  }
+  const installed = inventory && typeof inventory === "object" ? (inventory as { installed?: unknown }).installed : undefined;
+  if (!Array.isArray(installed)) {
+    warnings.push("Codex plugin inventory is unreadable.");
+    return pluginRoots;
+  }
+  for (const entry of installed) {
+    if (!entry || typeof entry !== "object") continue;
+    const plugin = entry as Record<string, unknown>;
+    if (plugin.installed !== true || typeof plugin.name !== "string") continue;
+    const source = plugin.source && typeof plugin.source === "object" ? plugin.source as Record<string, unknown> : {};
+    const root = typeof source.path === "string" ? source.path
+      : typeof plugin.marketplaceName === "string" && typeof plugin.version === "string"
+        ? join(codexHome, "plugins", "cache", plugin.marketplaceName, plugin.name, plugin.version)
+        : undefined;
+    if (!root || !existsSync(root)) continue;
+    pluginRoots.set(realpathSync(root), plugin.name);
+    if (plugin.enabled !== true) continue;
+    for (const file of skillFiles(join(root, "skills"))) addAvailableSkill(skills, file, "plugin", plugin.name);
+  }
+  return pluginRoots;
+}
+
+function sessionFiles(root: string): string[] {
+  if (!existsSync(root)) return [];
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(path);
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function* lines(path: string): Iterable<string> {
+  const descriptor = openSync(path, "r");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  const decoder = new StringDecoder("utf8");
+  let remainder = "";
+  try {
+    for (;;) {
+      const bytes = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (!bytes) break;
+      const text = remainder + decoder.write(buffer.subarray(0, bytes));
+      const lastNewline = text.lastIndexOf("\n");
+      if (lastNewline < 0) {
+        remainder = text;
+        continue;
+      }
+      yield* text.slice(0, lastNewline).split("\n");
+      remainder = text.slice(lastNewline + 1);
+    }
+    const last = remainder + decoder.end();
+    if (last) yield last;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function toolInput(payload: Record<string, unknown>): unknown {
+  const input = payload.input ?? payload.arguments;
+  if (typeof input !== "string") return input;
+  try { return JSON.parse(input) as unknown; } catch { return input; }
+}
+
+function stringValues(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(stringValues);
+  if (value && typeof value === "object") return Object.values(value).flatMap(stringValues);
+  return [];
+}
+
+function execCommands(name: string, input: unknown): string[] {
+  if (input && typeof input === "object") {
+    const command = (input as Record<string, unknown>).cmd;
+    return typeof command === "string" ? [command] : [];
+  }
+  if (name !== "exec" || typeof input !== "string") return [];
+  const commands: string[] = [];
+  for (const match of input.matchAll(/["']?cmd["']?\s*:\s*"((?:\\.|[^"\\])*)"/g)) {
+    try { commands.push(JSON.parse(`"${match[1]}"`) as string); } catch { commands.push(match[1]); }
+  }
+  return commands;
+}
+
+function skillReadPaths(payload: Record<string, unknown>, input: unknown): string[] {
+  const name = typeof payload.name === "string" ? payload.name : "";
+  const values = /^(?:read_file|read_mcp_resource|skills\.read)$/.test(name) ? stringValues(input)
+    : (name === "exec" || name === "exec_command") ? execCommands(name, input)
+      .filter((command) => /(?:^|[;&|]\s*)(?:cat|sed|head|tail|less|more|bat|rg|grep)\b/.test(command)) : [];
+  const paths = new Set<string>();
+  for (const value of values) {
+    for (const match of value.matchAll(/["']((?:\/|\.\.?\/)[^"'\n]*\/SKILL\.md)["']/g)) paths.add(match[1]);
+    for (const match of value.matchAll(/((?:\/|\.\.?\/)[^\s"'`;&|]*\/SKILL\.md)/g)) paths.add(match[1]);
+  }
+  return [...paths];
+}
+
+function scanSession(path: string, skills: Map<string, Skill>, codexHome: string, pluginRoots: Map<string, string>): number {
+  let corrupt = 0;
+  let turn = `session:${opaqueId(path)}`;
+  let cwd: string | undefined;
+  for (const line of lines(path)) {
+    if (!line) continue;
+    let record: { payload?: unknown; type?: unknown };
+    try { record = JSON.parse(line) as typeof record; } catch { corrupt += 1; continue; }
+    if (!record.payload || typeof record.payload !== "object") continue;
+    const payload = record.payload as Record<string, unknown>;
+    const metadata = payload.internal_chat_message_metadata_passthrough;
+    const metadataTurn = metadata && typeof metadata === "object"
+      ? (metadata as Record<string, unknown>).turn_id : undefined;
+    const recordTurn = typeof payload.turn_id === "string" ? payload.turn_id
+      : typeof metadataTurn === "string" ? metadataTurn : undefined;
+    if (record.type === "turn_context" || payload.type === "task_started") turn = recordTurn ?? turn;
+    if (typeof payload.cwd === "string") cwd = payload.cwd;
+    const useTurn = recordTurn ?? turn;
+
+    if (record.type === "event_msg" && payload.type === "user_message") {
+      const elements = Array.isArray(payload.text_elements) ? payload.text_elements : [];
+      for (const element of elements) {
+        if (!element || typeof element !== "object") continue;
+        const placeholder = (element as Record<string, unknown>).placeholder;
+        const match = typeof placeholder === "string" ? placeholder.match(/^\$([\w:-]+)$/) : undefined;
+        if (match) addUse(skills, match[1], useTurn, "explicit");
+      }
+      const direct = typeof payload.message === "string" ? payload.message.match(/^\$([\w:-]+)(?:\s|$)/) : undefined;
+      if (direct) addUse(skills, direct[1], useTurn, "explicit");
+    }
+
+    if (record.type !== "response_item" || (payload.type !== "custom_tool_call" && payload.type !== "function_call")) continue;
+    const input = toolInput(payload);
+    if (payload.name === "Skill" && input && typeof input === "object") {
+      const name = (input as Record<string, unknown>).skill;
+      if (typeof name === "string") addUse(skills, name, useTurn, "agent");
+    }
+    for (const reference of skillReadPaths(payload, input)) {
+      const referencedPath = isAbsolute(reference) ? reference : cwd ? resolve(cwd, reference) : undefined;
+      if (!referencedPath) continue;
+      const canonical = existsSync(referencedPath) ? realpathSync(referencedPath) : referencedPath;
+      const skill = [...skills.values()].find((candidate) => candidate.paths.has(reference)
+        || candidate.paths.has(referencedPath) || candidate.paths.has(canonical));
+      if (skill) recordUse(skill, useTurn, "inferred");
+      else addHistoricalUse(skills, referencedPath, codexHome, pluginRoots, useTurn);
+    }
+  }
+  return corrupt;
+}
+
+export function scanCodex(
+  cwd = process.cwd(),
+  home = homedir(),
+  codexHome = process.env.CODEX_HOME || join(home, ".codex")
+): CodexScan {
+  const skills = new Map<string, Skill>();
+  const warnings: string[] = [];
+  for (const file of skillFiles(join(home, ".agents", "skills"))) addAvailableSkill(skills, file, "global");
+  const systemRoot = join(codexHome, "skills", ".system");
+  const excluded = existsSync(systemRoot) ? new Set([realpathSync(systemRoot)]) : undefined;
+  for (const file of skillFiles(join(codexHome, "skills"), excluded)) addAvailableSkill(skills, file, "global");
+  for (const file of skillFiles(systemRoot)) addAvailableSkill(skills, file, "system");
+  for (const root of projectRoots(cwd)) {
+    for (const file of skillFiles(root)) addAvailableSkill(skills, file, "project");
+  }
+  const pluginRoots = parsePluginSkills(skills, warnings, codexHome);
+
+  let corrupt = 0;
+  for (const path of sessionFiles(join(codexHome, "sessions"))) corrupt += scanSession(path, skills, codexHome, pluginRoots);
+  for (const path of sessionFiles(join(codexHome, "archived_sessions"))) {
+    corrupt += scanSession(path, skills, codexHome, pluginRoots);
+  }
+  if (corrupt) warnings.push(`Codex skipped ${corrupt} malformed session record${corrupt === 1 ? "" : "s"}.`);
+
+  return {
+    skills: [...skills.values()].map((skill) => {
+      for (const kind of Object.keys(skill.byInvocationKind) as InvocationKind[]) skill.byInvocationKind[kind] = 0;
+      for (const kind of skill.uses.values()) skill.byInvocationKind[kind] += 1;
+      const total = skill.uses.size;
+      return {
+        available: skill.available, byAgent: { codex: total }, byInvocationKind: skill.byInvocationKind,
+        id: skill.id, members: ["codex"] as ["codex"], name: skill.name, source: skill.source, total
+      };
+    }).sort((left, right) => right.total - left.total || left.name.localeCompare(right.name)),
+    warnings
+  };
+}

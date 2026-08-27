@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import packageJson from "../package.json" with { type: "json" };
 import { scanClaude } from "./claude.js";
+import { scanCodex } from "./codex.js";
 
 const version = packageJson.version;
 
@@ -70,12 +71,12 @@ export function main(args = process.argv.slice(2)): number {
     return 2;
   }
 
-  const claude = options.agent === "codex" ? { skills: [], warnings: [] } : scanClaude();
+  const scan = options.agent === "codex" ? scanCodex() : scanClaude();
   console.log(JSON.stringify({
     schemaVersion: 1,
     scope: options.agent,
-    skills: claude.skills,
-    warnings: claude.warnings
+    skills: scan.skills,
+    warnings: scan.warnings
   }));
   return 0;
 }
