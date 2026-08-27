@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -179,4 +179,112 @@ test("--json --agent codex inventories skills and deduplicates session evidence"
   assert.equal(skills["stale:stale"].available, false);
   assert.deepEqual(skills["stale:stale"].byInvocationKind, { explicit: 0, agent: 0, inferred: 1 });
   assert.match(json.warnings.join("\n"), /malformed session record/);
+});
+
+test("CLI combines shared skills and scopes inventory and usage", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentskillsusage-"));
+  const home = join(root, "home");
+  const codexHome = join(root, "codex");
+  const project = join(root, "project");
+  const bin = join(root, "bin");
+  const shared = join(root, "shared");
+  const codexPlugin = join(root, "codex-plugin");
+  const claudePlugin = join(root, "claude-plugin");
+  const skill = (directory, name) => {
+    mkdirSync(join(directory, name), { recursive: true });
+    writeFileSync(join(directory, name, "SKILL.md"), `---\nname: ${name}\n---\n`);
+  };
+
+  skill(root, "shared");
+  mkdirSync(join(home, ".agents", "skills"), { recursive: true });
+  mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+  symlinkSync(shared, join(home, ".agents", "skills", "shared"));
+  symlinkSync(shared, join(home, ".claude", "skills", "shared"));
+  skill(join(home, ".agents", "skills"), "same-name");
+  skill(join(home, ".agents", "skills"), "zeta-used");
+  skill(join(home, ".claude", "skills"), "same-name");
+  skill(join(home, ".claude", "skills"), "alpha-used");
+  skill(join(codexPlugin, "skills"), "plugin-shared");
+  skill(join(codexPlugin, "skills"), "mixed-shared");
+  skill(join(claudePlugin, "skills"), "plugin-shared");
+  symlinkSync(join(codexPlugin, "skills", "mixed-shared"), join(home, ".agents", "skills", "mixed-shared"));
+  symlinkSync(join(codexPlugin, "skills", "mixed-shared"), join(home, ".claude", "skills", "mixed-shared"));
+  mkdirSync(join(project, ".git"), { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "codex"), `#!/bin/sh\nprintf '%s' '${JSON.stringify({ installed: [{
+    pluginId: "shared@fixture", name: "shared", installed: true, enabled: true,
+    source: { source: "local", path: codexPlugin }
+  }], available: [] })}'\n`);
+  writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '%s' '${JSON.stringify([{
+    id: "shared@fixture", enabled: true, installPath: claudePlugin
+  }])}'\n`);
+  chmodSync(join(bin, "codex"), 0o755);
+  chmodSync(join(bin, "claude"), 0o755);
+
+  const codexSessions = join(codexHome, "sessions");
+  const claudeSessions = join(home, ".claude", "projects");
+  mkdirSync(codexSessions, { recursive: true });
+  mkdirSync(claudeSessions, { recursive: true });
+  writeFileSync(join(codexSessions, "session.jsonl"), [
+    JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "codex-turn" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "$shared", text_elements: [{ placeholder: "$shared" }] } }),
+    JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "Skill", input: JSON.stringify({ skill: "shared:mixed-shared" }) } }),
+    JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "exec_command", input: JSON.stringify({ cmd: `cat ${join(home, ".agents", "skills", "mixed-shared", "SKILL.md")}` }) } }),
+    JSON.stringify({ type: "turn_context", payload: { turn_id: "codex-zeta" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "$zeta-used", text_elements: [{ placeholder: "$zeta-used" }] } })
+  ].join("\n"));
+  writeFileSync(join(claudeSessions, "session.jsonl"), [
+    JSON.stringify({ uuid: "claude-turn", type: "user", message: { content: "/shared" } }),
+    JSON.stringify({ uuid: "claude-alpha", type: "user", message: { content: "/alpha-used" } })
+  ].join("\n"));
+
+  t.after(() => rmSync(root, { recursive: true }));
+  const options = { cwd: project, env: { ...process.env, HOME: home, CODEX_HOME: codexHome, PATH: bin } };
+  const allResult = run(options, "--json");
+  const codexResult = run(options, "--json", "--agent", "codex");
+  const claudeResult = run(options, "--json", "--agent", "claude");
+  assert.equal(allResult.status, 0);
+  assert.equal(codexResult.status, 0);
+  assert.equal(claudeResult.status, 0);
+
+  const all = JSON.parse(allResult.stdout);
+  const codex = JSON.parse(codexResult.stdout);
+  const claude = JSON.parse(claudeResult.stdout);
+  const sharedAll = all.skills.find((entry) => entry.name === "shared");
+  const sharedCodex = codex.skills.find((entry) => entry.name === "shared");
+  const sharedClaude = claude.skills.find((entry) => entry.name === "shared");
+  assert.deepEqual(sharedAll.members, ["codex", "claude"]);
+  assert.deepEqual(sharedAll.byAgent, { codex: 1, claude: 1 });
+  assert.equal(sharedAll.total, 2);
+  assert.equal(sharedAll.id, sharedCodex.id);
+  assert.equal(sharedAll.id, sharedClaude.id);
+  assert.deepEqual(sharedCodex.members, ["codex"]);
+  assert.deepEqual(sharedCodex.byAgent, { codex: 1 });
+  assert.equal(sharedCodex.total, 1);
+  assert.deepEqual(sharedClaude.members, ["claude"]);
+  assert.deepEqual(sharedClaude.byAgent, { claude: 1 });
+  assert.equal(sharedClaude.total, 1);
+
+  const allSameName = all.skills.filter((entry) => entry.name === "same-name");
+  assert.equal(allSameName.length, 2);
+  assert.deepEqual(new Set(allSameName.map((entry) => entry.sourceHint)), new Set(["codex", "claude"]));
+  assert.equal(codex.skills.filter((entry) => entry.name === "same-name").length, 1);
+  assert.equal(claude.skills.filter((entry) => entry.name === "same-name").length, 1);
+  const pluginShared = all.skills.find((entry) => entry.name === "shared:plugin-shared");
+  assert.deepEqual(pluginShared.members, ["codex", "claude"]);
+  const mixedShared = all.skills.find((entry) => entry.name === "mixed-shared");
+  assert.deepEqual(mixedShared.members, ["codex", "claude"]);
+  const mixedCodex = codex.skills.find((entry) => entry.name === "mixed-shared");
+  assert.equal(mixedShared.id, mixedCodex.id);
+  assert.equal(mixedShared.id, claude.skills.find((entry) => entry.name === "mixed-shared").id);
+  assert.equal(mixedCodex.total, 1);
+  assert.deepEqual(mixedCodex.byInvocationKind, { explicit: 0, agent: 1, inferred: 0 });
+
+  const used = all.skills.filter((entry) => entry.total > 0);
+  const unused = all.skills.filter((entry) => entry.total === 0);
+  assert.deepEqual(used.map((entry) => [entry.name, entry.total]), [
+    ["shared", 2], ["alpha-used", 1], ["mixed-shared", 1], ["zeta-used", 1]
+  ]);
+  assert.deepEqual(unused.map((entry) => entry.name), unused.map((entry) => entry.name).toSorted());
+  assert.doesNotMatch(allResult.stdout, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });

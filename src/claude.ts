@@ -1,9 +1,12 @@
-import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import {
+  findSkillByIdentity, installationIdentities, preferredSkillIdentity, skillFiles, skillId, skillIdentity,
+  skillIdentityMap, type SkillIdentity
+} from "./skill.js";
 
 type InvocationKind = "explicit" | "agent" | "inferred";
 type Source = "global" | "system" | "project" | "plugin";
@@ -13,6 +16,7 @@ type Skill = {
   available: boolean;
   byInvocationKind: Record<InvocationKind, number>;
   id: string;
+  identities: Map<string, SkillIdentity>;
   members: Set<"claude">;
   name: string;
   source: Source | "history";
@@ -24,6 +28,7 @@ export type ClaudeSkill = {
   byAgent: { claude: number };
   byInvocationKind: Record<InvocationKind, number>;
   id: string;
+  identities: SkillIdentity[];
   members: ["claude"];
   name: string;
   source: Source | "history";
@@ -34,50 +39,41 @@ export type ClaudeScan = { skills: ClaudeSkill[]; warnings: string[] };
 
 const precedence: Record<InvocationKind, number> = { inferred: 1, agent: 2, explicit: 3 };
 
-function opaqueId(value: string): string {
-  return `claude-${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
-}
-
 function skillName(path: string): string {
   const content = readFileSync(path, "utf8");
   return content.match(/^name:\s*["']?([^\n"']+)/m)?.[1].trim() || basename(resolve(path, ".."));
 }
 
-function skillFiles(root: string): string[] {
-  if (!existsSync(root)) return [];
-  const files: string[] = [];
-  const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) visit(path);
-      else if (entry.isFile() && entry.name === "SKILL.md") files.push(path);
-    }
-  };
-  visit(root);
-  return files;
-}
-
-function addAvailableSkill(skills: Map<string, Skill>, path: string, source: Source, namespace?: string): void {
+function addAvailableSkill(
+  skills: Map<string, Skill>, path: string, source: Source, namespace?: string, identity?: string
+): void {
   const canonical = realpathSync(path);
+  const identities = installationIdentities(canonical, identity);
   const localName = skillName(canonical);
   const name = namespace ? `${namespace}:${localName}` : localName;
-  const id = opaqueId(canonical);
-  const skill = skills.get(id) ?? {
-    aliases: new Set<string>(), available: true,
-    byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
-    members: new Set<"claude">(["claude"]), name, source, uses: new Map<string, InvocationKind>()
-  };
+  const skill = findSkillByIdentity(skills.values(), identities) ?? (() => {
+    const id = skillId(preferredSkillIdentity(identities).key);
+    const created: Skill = {
+      aliases: new Set<string>(), available: true,
+      byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
+      identities: new Map<string, SkillIdentity>(), members: new Set<"claude">(["claude"]), name, source,
+      uses: new Map<string, InvocationKind>()
+    };
+    skills.set(id, created);
+    return created;
+  })();
   skill.aliases.add(name);
   skill.aliases.add(localName);
-  skills.set(id, skill);
+  for (const value of identities) skill.identities.set(value.key, value);
 }
 
 function addSystemSkills(skills: Map<string, Skill>): void {
   for (const name of ["debug", "simplify"]) {
-    const id = opaqueId(`system:${name}`);
+    const id = skillId(`system:${name}`);
     skills.set(id, {
       aliases: new Set([name]), available: true,
       byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
+      identities: skillIdentityMap(skillIdentity("system", name)),
       members: new Set<"claude">(["claude"]), name, source: "system", uses: new Map<string, InvocationKind>()
     });
   }
@@ -117,7 +113,9 @@ function parsePluginSkills(skills: Map<string, Skill>, warnings: string[]): bool
       const manifest = JSON.parse(readFileSync(join(installPath, ".claude-plugin", "plugin.json"), "utf8")) as { name?: unknown };
       if (typeof manifest.name === "string") namespace = manifest.name;
     } catch { /* The plugin id is the documented fallback namespace. */ }
-    for (const file of skillFiles(join(installPath, "skills"))) addAvailableSkill(skills, file, "plugin", namespace);
+    for (const file of skillFiles(join(installPath, "skills"))) {
+      addAvailableSkill(skills, file, "plugin", namespace, `plugin:${id}:${relative(installPath, file)}`);
+    }
   }
   return true;
 }
@@ -127,11 +125,12 @@ function addUse(skills: Map<string, Skill>, name: string, turn: string, kind: In
   const sourceRank: Record<Skill["source"], number> = { global: 3, project: 2, system: 1, plugin: 0, history: 0 };
   const best = matches.filter((skill) => sourceRank[skill.source] === Math.max(...matches.map((match) => sourceRank[match.source])));
   const skill = best.length === 1 ? best[0] : (() => {
-    const id = opaqueId(`history:${name}`);
+    const id = skillId(`claude:history:${name}`);
     const history = skills.get(id) ?? {
       aliases: new Set([name]), available: false,
       byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
-      members: new Set<"claude">(["claude"]), name: /^[\w:-]+$/.test(name) ? name : `unknown-${opaqueId(name).slice(-8)}`,
+      identities: skillIdentityMap(skillIdentity("history", `claude:${name}`)),
+      members: new Set<"claude">(["claude"]), name: /^[\w:-]+$/.test(name) ? name : `unknown-${skillId(name).slice(-8)}`,
       source: "history" as const, uses: new Map<string, InvocationKind>()
     };
     skills.set(id, history);
@@ -256,7 +255,8 @@ export function scanClaude(cwd = process.cwd(), home = homedir()): ClaudeScan {
       const total = skill.uses.size;
       return {
         available: skill.available, byAgent: { claude: total }, byInvocationKind: skill.byInvocationKind,
-        id: skill.id, members: ["claude"] as ["claude"], name: skill.name, source: skill.source, total
+        id: skill.id, identities: [...skill.identities.values()], members: ["claude"] as ["claude"],
+        name: skill.name, source: skill.source, total
       };
     }).sort((left, right) => right.total - left.total || left.name.localeCompare(right.name)),
     warnings

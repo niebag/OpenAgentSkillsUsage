@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import packageJson from "../package.json" with { type: "json" };
-import { scanClaude } from "./claude.js";
-import { scanCodex } from "./codex.js";
+import { aggregate } from "./aggregate.js";
 
 const version = packageJson.version;
 
@@ -71,7 +70,7 @@ export function main(args = process.argv.slice(2)): number {
     return 2;
   }
 
-  const scan = options.agent === "codex" ? scanCodex() : scanClaude();
+  const scan = aggregate(options.agent);
   console.log(JSON.stringify({
     schemaVersion: 1,
     scope: options.agent,

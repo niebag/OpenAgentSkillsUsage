@@ -1,9 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import {
+  findSkillByIdentity, installationIdentities, preferredSkillIdentity, skillFiles, skillId, skillIdentity,
+  skillIdentityMap, type SkillIdentity
+} from "./skill.js";
 
 type InvocationKind = "explicit" | "agent" | "inferred";
 type Source = "global" | "system" | "project" | "plugin";
@@ -13,6 +16,7 @@ type Skill = {
   available: boolean;
   byInvocationKind: Record<InvocationKind, number>;
   id: string;
+  identities: Map<string, SkillIdentity>;
   name: string;
   paths: Set<string>;
   source: Source | "history";
@@ -24,6 +28,7 @@ export type CodexSkill = {
   byAgent: { codex: number };
   byInvocationKind: Record<InvocationKind, number>;
   id: string;
+  identities: SkillIdentity[];
   members: ["codex"];
   name: string;
   source: Source | "history";
@@ -34,48 +39,34 @@ export type CodexScan = { skills: CodexSkill[]; warnings: string[] };
 
 const precedence: Record<InvocationKind, number> = { inferred: 1, agent: 2, explicit: 3 };
 
-function opaqueId(value: string): string {
-  return `codex-${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
-}
-
 function skillName(path: string): string {
   const content = readFileSync(path, "utf8");
   return content.match(/^name:\s*["']?([^\n"']+)/m)?.[1].trim() || basename(resolve(path, ".."));
 }
 
-function skillFiles(root: string, excluded = new Set<string>()): string[] {
-  if (!existsSync(root)) return [];
-  const files: string[] = [];
-  const visited = new Set<string>();
-  const visit = (directory: string): void => {
-    const canonicalDirectory = realpathSync(directory);
-    if (visited.has(canonicalDirectory) || excluded.has(canonicalDirectory)) return;
-    visited.add(canonicalDirectory);
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory() || (entry.isSymbolicLink() && existsSync(path) && !entry.isFile())) visit(path);
-      else if (entry.isFile() && entry.name === "SKILL.md") files.push(path);
-    }
-  };
-  visit(root);
-  return files;
-}
-
-function addAvailableSkill(skills: Map<string, Skill>, path: string, source: Source, namespace?: string): void {
+function addAvailableSkill(
+  skills: Map<string, Skill>, path: string, source: Source, namespace?: string, identity?: string
+): void {
   const canonical = realpathSync(path);
+  const identities = installationIdentities(canonical, identity);
   const localName = skillName(canonical);
   const name = namespace ? `${namespace}:${localName}` : localName;
-  const id = opaqueId(canonical);
-  const skill = skills.get(id) ?? {
-    aliases: new Set<string>(), available: true,
-    byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id, name,
-    paths: new Set<string>(), source, uses: new Map<string, InvocationKind>()
-  };
+  const skill = findSkillByIdentity(skills.values(), identities) ?? (() => {
+    const id = skillId(preferredSkillIdentity(identities).key);
+    const created: Skill = {
+      aliases: new Set<string>(), available: true,
+      byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id, name,
+      identities: new Map<string, SkillIdentity>(), paths: new Set<string>(), source,
+      uses: new Map<string, InvocationKind>()
+    };
+    skills.set(id, created);
+    return created;
+  })();
   skill.aliases.add(name);
   skill.aliases.add(localName);
+  for (const value of identities) skill.identities.set(value.key, value);
   skill.paths.add(path);
   skill.paths.add(canonical);
-  skills.set(id, skill);
 }
 
 function recordUse(skill: Skill, turn: string, kind: InvocationKind): void {
@@ -89,10 +80,11 @@ function addUse(skills: Map<string, Skill>, name: string, turn: string, kind: In
   const bestRank = Math.max(...matches.map((match) => sourceRank[match.source]));
   const best = matches.filter((skill) => sourceRank[skill.source] === bestRank);
   const skill = best.length === 1 ? best[0] : (() => {
-    const id = opaqueId(`history:${name}`);
+    const id = skillId(`codex:history:${name}`);
     const history = skills.get(id) ?? {
       aliases: new Set([name]), available: false,
       byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
+      identities: skillIdentityMap(skillIdentity("history", `codex:${name}`)),
       name: /^[\w:-]+$/.test(name) ? name : `unknown-${id.slice(-8)}`,
       paths: new Set<string>(), source: "history" as const, uses: new Map<string, InvocationKind>()
     };
@@ -118,10 +110,11 @@ function addHistoricalUse(
   const authoritativePluginName = [...pluginRoots].find(([root]) => canonical.startsWith(`${root}${sep}`))?.[1];
   const pluginName = authoritativePluginName ?? cachedPluginName;
   const name = pluginName ? `${pluginName}:${localName}` : localName;
-  const id = opaqueId(`history-path:${canonical}`);
+  const id = skillId(`history-path:${canonical}`);
   const skill = skills.get(id) ?? {
     aliases: new Set([name, localName]), available: false,
     byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id, name,
+    identities: skillIdentityMap(skillIdentity("history", `codex:path:${canonical}`)),
     paths: new Set([path, canonical]), source: "history" as const, uses: new Map<string, InvocationKind>()
   };
   skills.set(id, skill);
@@ -171,7 +164,11 @@ function parsePluginSkills(skills: Map<string, Skill>, warnings: string[], codex
     if (!root || !existsSync(root)) continue;
     pluginRoots.set(realpathSync(root), plugin.name);
     if (plugin.enabled !== true) continue;
-    for (const file of skillFiles(join(root, "skills"))) addAvailableSkill(skills, file, "plugin", plugin.name);
+    for (const file of skillFiles(join(root, "skills"))) {
+      const identity = typeof plugin.pluginId === "string"
+        ? `plugin:${plugin.pluginId}:${relative(root, file)}` : undefined;
+      addAvailableSkill(skills, file, "plugin", plugin.name, identity);
+    }
   }
   return pluginRoots;
 }
@@ -256,7 +253,7 @@ function skillReadPaths(payload: Record<string, unknown>, input: unknown): strin
 
 function scanSession(path: string, skills: Map<string, Skill>, codexHome: string, pluginRoots: Map<string, string>): number {
   let corrupt = 0;
-  let turn = `session:${opaqueId(path)}`;
+  let turn = `session:${skillId(path)}`;
   let cwd: string | undefined;
   for (const line of lines(path)) {
     if (!line) continue;
@@ -335,7 +332,8 @@ export function scanCodex(
       const total = skill.uses.size;
       return {
         available: skill.available, byAgent: { codex: total }, byInvocationKind: skill.byInvocationKind,
-        id: skill.id, members: ["codex"] as ["codex"], name: skill.name, source: skill.source, total
+        id: skill.id, identities: [...skill.identities.values()], members: ["codex"] as ["codex"],
+        name: skill.name, source: skill.source, total
       };
     }).sort((left, right) => right.total - left.total || left.name.localeCompare(right.name)),
     warnings
