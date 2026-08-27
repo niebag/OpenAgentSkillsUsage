@@ -1,0 +1,27 @@
+{
+  "name": "openagentskillsusage",
+  "version": "0.1.0",
+  "description": "A local read-only overview of Agent Skill usage",
+  "type": "module",
+  "bin": {
+    "agentskillsusage": "dist/cli.js",
+    "openagentskillsusage": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test test/cli.test.js",
+    "check": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "license": "MIT"
+}
