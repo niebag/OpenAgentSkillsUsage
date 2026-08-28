@@ -10,13 +10,13 @@ const skills = [
 ];
 
 test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () => {
-  const scans = [];
+  let scans = 0;
   const pending = [];
   const progressListeners = [];
   let cancelled = 0;
   let quit = false;
-  const scan = (scope) => {
-    scans.push(scope);
+  const scan = () => {
+    scans += 1;
     return {
       cancel: () => { cancelled += 1; },
       onProgress: (listener) => {
@@ -24,7 +24,9 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
         return () => {};
       },
       result: new Promise((resolve) => pending.push(() => resolve({
-        hasReadableData: true, skills: scope === "claude" ? [...skills].reverse() : skills, warnings: []
+        all: { hasReadableData: true, skills, warnings: [] },
+        codex: { hasReadableData: true, skills, warnings: [] },
+        claude: { hasReadableData: true, skills: [...skills].reverse(), warnings: [] }
       })))
     };
   };
@@ -32,7 +34,13 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
 
   await new Promise(setImmediate);
   assert.match(app.lastFrame(), /Preparing scan/);
-  assert.deepEqual(scans, ["all"]);
+  assert.equal(scans, 1);
+  app.stdin.write("\u001B[C");
+  await new Promise(setImmediate);
+  assert.equal(scans, 1);
+  app.stdin.write("\u001B[D");
+  await new Promise(setImmediate);
+  assert.equal(scans, 1);
   progressListeners[0]({ label: "Scanning Codex history", percent: 42 });
   await new Promise(setImmediate);
   assert.match(app.lastFrame(), /42%/);
@@ -49,18 +57,11 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
   assert.match(app.lastFrame(), /INFERRED/);
   app.stdin.write("\u001B[C");
   await new Promise(setImmediate);
-  assert.match(app.lastFrame(), /0%/);
+  assert.match(app.lastFrame(), /Codex/);
   app.stdin.write("\u001B[C");
   await new Promise(setImmediate);
-  assert.equal(cancelled, 1);
-  pending.shift()();
-  await new Promise(setImmediate);
-  assert.match(app.lastFrame(), /0%/);
-  pending.shift()();
-  await new Promise(setImmediate);
-  await new Promise(setImmediate);
   assert.match(app.lastFrame(), /Claude/);
-  assert.deepEqual(scans, ["all", "codex", "claude"]);
+  assert.equal(scans, 1);
   assert.match(app.lastFrame(), /zero/);
   app.stdin.write("\u001B[B");
   await new Promise(setImmediate);
@@ -73,7 +74,8 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
   assert.match(app.lastFrame(), /alpha/);
   app.stdin.write("r");
   await new Promise(setImmediate);
-  assert.equal(scans.at(-1), "claude");
+  assert.equal(scans, 2);
+  assert.equal(cancelled, 0);
   pending.shift()();
   await new Promise(setImmediate);
   app.stdin.write("q");

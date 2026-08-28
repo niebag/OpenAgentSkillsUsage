@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput } from "ink";
-import type { AggregateScan, AggregateSkill, ScanProgress, Scope } from "./aggregate.js";
+import type { AggregateScan, AggregateScans, AggregateSkill, ScanProgress, Scope } from "./aggregate.js";
 import { scanInWorker, type ScanTask } from "./scan.js";
 
-type Scan = (scope: Scope) => ScanTask;
+type Scan = () => ScanTask;
 
 const scopes: Scope[] = ["all", "codex", "claude"];
 
@@ -38,6 +38,7 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
   const scopeRef = useRef(initialScope);
   const scanRef = useRef(0);
   const activeScanRef = useRef<ScanTask | undefined>(undefined);
+  const scansRef = useRef<AggregateScans | undefined>(undefined);
   const visible = Math.max(1, height - 6);
   const maximum = Math.max(1, ...(view.result?.skills.map((skill) => skill.total) ?? []));
   const rows = view.result?.skills.slice(view.offset, view.offset + visible) ?? [];
@@ -46,16 +47,18 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
     activeScanRef.current?.cancel();
     scopeRef.current = scope;
     setView({ loading: true, offset: 0, progress: { label: "Preparing scan", percent: 0 }, scope });
-    const task = scan(scope);
+    const task = scan();
     activeScanRef.current = task;
     const stopProgress = task.onProgress((progress) => {
       if (scanRef.current === request) setView((current) => ({ ...current, progress }));
     });
-    void task.result.then((result) => {
+    void task.result.then((scans) => {
       if (scanRef.current === request) {
         stopProgress();
         activeScanRef.current = undefined;
-        setView({ loading: false, offset: 0, result, scope });
+        scansRef.current = scans;
+        const currentScope = scopeRef.current;
+        setView({ loading: false, offset: 0, result: scans[currentScope], scope: currentScope });
       }
     }, () => {
       if (scanRef.current === request) {
@@ -74,7 +77,10 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
   }, []);
   const changeScope = (direction: number) => {
     const next = scopes[(scopes.indexOf(scopeRef.current) + direction + scopes.length) % scopes.length];
-    refresh(next);
+    scopeRef.current = next;
+    const scans = scansRef.current;
+    if (scans) setView({ loading: false, offset: 0, result: scans[next], scope: next });
+    else setView((current) => ({ ...current, offset: 0, scope: next }));
   };
 
   useInput((input, key) => {

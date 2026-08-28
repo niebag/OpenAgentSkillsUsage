@@ -1,17 +1,17 @@
 import { Worker } from "node:worker_threads";
-import type { AggregateScan, ScanProgress, Scope } from "./aggregate.js";
+import type { AggregateScans, ScanProgress } from "./aggregate.js";
 
 export type ScanTask = {
   cancel: () => void;
   onProgress: (listener: (progress: ScanProgress) => void) => () => void;
-  result: Promise<AggregateScan>;
+  result: Promise<AggregateScans>;
 };
 
-export function scanInWorker(scope: Scope): ScanTask {
+export function scanInWorker(): ScanTask {
   let cancel = () => {};
   const listeners = new Set<(progress: ScanProgress) => void>();
-  const result = new Promise<AggregateScan>((resolve, reject) => {
-    const worker = new Worker(new URL("./scan-worker.js", import.meta.url), { workerData: scope });
+  const result = new Promise<AggregateScans>((resolve, reject) => {
+    const worker = new Worker(new URL("./scan-worker.js", import.meta.url));
     cancel = () => { void worker.terminate().catch(() => {}); };
     let complete = false;
     const finish = (callback: () => void) => {
@@ -19,11 +19,11 @@ export function scanInWorker(scope: Scope): ScanTask {
       complete = true;
       callback();
     };
-    worker.on("message", (message: { progress?: ScanProgress; scan?: AggregateScan; type?: string }) => {
+    worker.on("message", (message: { progress?: ScanProgress; scans?: AggregateScans; type?: string }) => {
       if (message.type === "progress" && message.progress) {
         for (const listener of listeners) listener(message.progress);
-      } else if (message.type === "result" && message.scan) {
-        finish(() => resolve(message.scan!));
+      } else if (message.type === "result" && message.scans) {
+        finish(() => resolve(message.scans!));
       }
     });
     worker.once("error", (error) => finish(() => reject(error)));

@@ -20,6 +20,7 @@ export type AggregateSkill = {
 };
 
 export type AggregateScan = { hasReadableData: boolean; skills: AggregateSkill[]; warnings: string[] };
+export type AggregateScans = Record<Scope, AggregateScan>;
 export type ScanProgress = { label: string; percent: number };
 
 function agentOf(skill: Skill): Agent {
@@ -55,18 +56,10 @@ function groupByIdentity(skills: Skill[]): Skill[][] {
   return [...Map.groupBy(skills, (_, index) => find(index)).values()];
 }
 
-export function aggregate(scope: Scope, onProgress?: (progress: ScanProgress) => void): AggregateScan {
-  let lastPercent = -1;
-  const report = (label: string, start: number, end: number) => (percent: number) => {
-    const nextPercent = Math.round(start + (end - start) * percent / 100);
-    if (nextPercent === lastPercent) return;
-    lastPercent = nextPercent;
-    onProgress?.({ label, percent: nextPercent });
-  };
-  const scans = {
-    codex: scanCodex(process.cwd(), undefined, undefined, report("Scanning Codex history", 0, 50)),
-    claude: scanClaude(process.cwd(), undefined, report("Scanning Claude history", 50, 100))
-  };
+function aggregateScope(scope: Scope, scans: {
+  codex: ReturnType<typeof scanCodex>;
+  claude: ReturnType<typeof scanClaude>;
+}): AggregateScan {
   const selectedAgents: Agent[] = scope === "all" ? ["codex", "claude"] : [scope];
   const groups = groupByIdentity([...scans.codex.skills, ...scans.claude.skills]);
   const skills = groups.flatMap((group): AggregateSkill[] => {
@@ -94,9 +87,33 @@ export function aggregate(scope: Scope, onProgress?: (progress: ScanProgress) =>
   disambiguate(skills);
   skills.sort((left, right) => right.total - left.total || left.name.localeCompare(right.name)
     || (left.sourceHint ?? "").localeCompare(right.sourceHint ?? "") || left.id.localeCompare(right.id));
-  onProgress?.({ label: "Finalizing results", percent: 100 });
   return {
     hasReadableData: selectedAgents.some((agent) => scans[agent].inventoryReadable || scans[agent].historyReadable),
     skills, warnings: selectedAgents.flatMap((agent) => scans[agent].warnings)
   };
+}
+
+export function aggregateScopes(onProgress?: (progress: ScanProgress) => void): AggregateScans {
+  let lastPercent = -1;
+  const report = (label: string, start: number, end: number) => (percent: number) => {
+    const nextPercent = Math.round(start + (end - start) * percent / 100);
+    if (nextPercent === lastPercent) return;
+    lastPercent = nextPercent;
+    onProgress?.({ label, percent: nextPercent });
+  };
+  const scans = {
+    codex: scanCodex(process.cwd(), undefined, undefined, report("Scanning Codex history", 0, 50)),
+    claude: scanClaude(process.cwd(), undefined, report("Scanning Claude history", 50, 100))
+  };
+  const results = {
+    all: aggregateScope("all", scans),
+    codex: aggregateScope("codex", scans),
+    claude: aggregateScope("claude", scans)
+  };
+  onProgress?.({ label: "Finalizing results", percent: 100 });
+  return results;
+}
+
+export function aggregate(scope: Scope, onProgress?: (progress: ScanProgress) => void): AggregateScan {
+  return aggregateScopes(onProgress)[scope];
 }
