@@ -7,6 +7,7 @@ const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.me
 
 test("release workflow validates and publishes an owner-approved tagged artifact", () => {
   assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /contents: write/);
   assert.match(workflow, /tag:\n\s+description:.*\n\s+required: true/);
   assert.match(workflow, /if: github\.actor == github\.repository_owner/);
   assert.match(workflow, /ref: refs\/tags\/\$\{\{ inputs\.tag \}\}/);
@@ -19,6 +20,8 @@ test("release workflow validates and publishes an owner-approved tagged artifact
   assert.match(workflow, /npm publish "\$\{\{ steps\.pack\.outputs\.tarball \}\}" --dry-run/);
   assert.match(workflow, /npm publish "\$\{\{ steps\.pack\.outputs\.tarball \}\}" --provenance --access public/);
   assert.match(workflow, /NODE_AUTH_TOKEN: \$\{\{ secrets\.NPM_TOKEN \}\}/);
+  assert.match(workflow, /gh release create "\$RELEASE_TAG" --title "OpenAgentSkillsUsage \$\{RELEASE_TAG#v\}" --generate-notes/);
+  assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/);
   assert.deepEqual(packageJson.repository, {
     type: "git",
     url: "git+https://github.com/niebag/OpenAgentSkillsUsage.git"
@@ -31,7 +34,8 @@ test("release workflow validates and publishes an owner-approved tagged artifact
     "name: Pack artifact",
     "name: Validate packed artifact",
     "name: Check package name availability",
-    "name: Publish package"
+    "name: Publish package",
+    "name: Create GitHub release"
   ];
   const positions = orderedSteps.map((step) => workflow.indexOf(step));
   positions.reduce((previous, position, index) => {
@@ -39,6 +43,6 @@ test("release workflow validates and publishes an owner-approved tagged artifact
     return position;
   }, -1);
 
-  const [availability, publish] = positions.slice(-2);
+  const [availability, publish] = positions.slice(-3, -1);
   assert.doesNotMatch(workflow.slice(availability, publish), /\n\s+- name:/);
 });
