@@ -37,6 +37,7 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
   await new Promise(setImmediate);
   assert.match(app.lastFrame(), /42%/);
   assert.match(app.lastFrame(), /Scanning Codex history/);
+  assert.ok(app.lastFrame().indexOf("Scanning Codex history") < app.lastFrame().indexOf("42%"));
   pending.shift()();
   await new Promise(setImmediate);
 

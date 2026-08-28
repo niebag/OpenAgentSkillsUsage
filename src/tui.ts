@@ -91,7 +91,7 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
   return React.createElement(Box, { borderColor: "cyan", borderStyle: "round", flexDirection: "column", paddingX: 1 },
     React.createElement(Box, { justifyContent: "space-between" },
       React.createElement(Text, { bold: true, color: "cyan" }, "Open Agent Skills Usage"),
-      React.createElement(Text, { dimColor: true }, view.loading ? progressBar(view.progress?.percent ?? 0) : view.error ?? summary(view.result!))
+      React.createElement(Text, { dimColor: true }, view.loading ? "" : view.error ?? summary(view.result!))
     ),
     React.createElement(Box, null,
       React.createElement(Text, { dimColor: true }, "Scope  "),
@@ -101,7 +101,10 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
       ])
     ),
     React.createElement(Text, { dimColor: true }, "SKILL                         USAGE          TOTAL  EXPLICIT AGENT INFERRED"),
-    view.loading || view.error ? React.createElement(Text, { dimColor: true }, view.loading ? view.progress?.label : view.error) : null,
+    view.loading ? React.createElement(React.Fragment, null,
+      React.createElement(Text, { dimColor: true }, view.progress?.label),
+      React.createElement(Text, { dimColor: true }, progressBar(view.progress?.percent ?? 0))
+    ) : view.error ? React.createElement(Text, { dimColor: true }, view.error) : null,
     ...rows.map((skill) => React.createElement(Text, { key: skill.id },
       `${skill.name.slice(0, 29).padEnd(29)} `,
       React.createElement(Text, { color: skill.total ? "cyan" : undefined, dimColor: !skill.total }, bar(skill, maximum).padEnd(12)),
