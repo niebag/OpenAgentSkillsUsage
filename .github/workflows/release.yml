@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example, v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          test "$RELEASE_TAG" = "v$PACKAGE_VERSION"
+          test "$(git tag --points-at HEAD --list "$RELEASE_TAG")" = "$RELEASE_TAG"
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Pack artifact
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          TARBALL=$(node -p "JSON.parse(require('node:fs').readFileSync('pack.json', 'utf8'))[0].filename")
+          test -f "$TARBALL"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+      - name: Validate packed artifact
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --dry-run
+      - name: Check package name availability
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          set +e
+          OUTPUT=$(npm view "$PACKAGE_NAME" name 2>&1)
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ]; then
+            echo "$PACKAGE_NAME already exists on npm; this is not its first release."
+          elif grep -q E404 <<< "$OUTPUT"; then
+            echo "$PACKAGE_NAME is available for its first release."
+          else
+            echo "$OUTPUT" >&2
+            exit "$STATUS"
+          fi
+      - name: Publish package
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

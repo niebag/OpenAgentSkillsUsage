@@ -2,6 +2,10 @@
   "name": "openagentskillsusage",
   "version": "0.1.0",
   "description": "A local read-only overview of Agent Skill usage",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/niebag/OpenAgentSkillsUsage.git"
+  },
   "type": "module",
   "bin": {
     "agentskillsusage": "dist/cli.js",
