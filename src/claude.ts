@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import {
   findSkillByIdentity, installationIdentities, preferredSkillIdentity, skillFiles, skillId, skillIdentity,
-  skillIdentityMap, type SkillIdentity
+  readableDirectory, skillIdentityMap, type SkillIdentity
 } from "./skill.js";
 
 type InvocationKind = "explicit" | "agent" | "inferred";
@@ -35,7 +35,7 @@ export type ClaudeSkill = {
   total: number;
 };
 
-export type ClaudeScan = { skills: ClaudeSkill[]; warnings: string[] };
+export type ClaudeScan = { historyReadable: boolean; inventoryReadable: boolean; skills: ClaudeSkill[]; warnings: string[] };
 
 const precedence: Record<InvocationKind, number> = { inferred: 1, agent: 2, explicit: 3 };
 
@@ -45,26 +45,32 @@ function skillName(path: string): string {
 }
 
 function addAvailableSkill(
-  skills: Map<string, Skill>, path: string, source: Source, namespace?: string, identity?: string
-): void {
-  const canonical = realpathSync(path);
-  const identities = installationIdentities(canonical, identity);
-  const localName = skillName(canonical);
-  const name = namespace ? `${namespace}:${localName}` : localName;
-  const skill = findSkillByIdentity(skills.values(), identities) ?? (() => {
-    const id = skillId(preferredSkillIdentity(identities).key);
-    const created: Skill = {
-      aliases: new Set<string>(), available: true,
-      byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
-      identities: new Map<string, SkillIdentity>(), members: new Set<"claude">(["claude"]), name, source,
-      uses: new Map<string, InvocationKind>()
-    };
-    skills.set(id, created);
-    return created;
-  })();
-  skill.aliases.add(name);
-  skill.aliases.add(localName);
-  for (const value of identities) skill.identities.set(value.key, value);
+  skills: Map<string, Skill>, path: string, source: Source, namespace?: string, identity?: string, warnings?: string[]
+): boolean {
+  try {
+    const canonical = realpathSync(path);
+    const identities = installationIdentities(canonical, identity);
+    const localName = skillName(canonical);
+    const name = namespace ? `${namespace}:${localName}` : localName;
+    const skill = findSkillByIdentity(skills.values(), identities) ?? (() => {
+      const id = skillId(preferredSkillIdentity(identities).key);
+      const created: Skill = {
+        aliases: new Set<string>(), available: true,
+        byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id,
+        identities: new Map<string, SkillIdentity>(), members: new Set<"claude">(["claude"]), name, source,
+        uses: new Map<string, InvocationKind>()
+      };
+      skills.set(id, created);
+      return created;
+    })();
+    skill.aliases.add(name);
+    skill.aliases.add(localName);
+    for (const value of identities) skill.identities.set(value.key, value);
+    return true;
+  } catch {
+    warnings?.push("Claude skipped an unreadable Skill file.");
+    return false;
+  }
 }
 
 function addSystemSkills(skills: Map<string, Skill>): void {
@@ -114,7 +120,7 @@ function parsePluginSkills(skills: Map<string, Skill>, warnings: string[]): bool
       if (typeof manifest.name === "string") namespace = manifest.name;
     } catch { /* The plugin id is the documented fallback namespace. */ }
     for (const file of skillFiles(join(installPath, "skills"))) {
-      addAvailableSkill(skills, file, "plugin", namespace, `plugin:${id}:${relative(installPath, file)}`);
+      addAvailableSkill(skills, file, "plugin", namespace, `plugin:${id}:${relative(installPath, file)}`, warnings);
     }
   }
   return true;
@@ -150,18 +156,22 @@ type SessionRecord = {
   uuid?: unknown;
 };
 
-function sessionFiles(root: string): string[] {
-  if (!existsSync(root)) return [];
+function sessionFiles(root: string): { files: string[]; readable: boolean; unavailable: boolean } {
+  const readable = readableDirectory(root);
+  if (!readable) return { files: [], readable, unavailable: existsSync(root) };
   const files: string[] = [];
+  let unavailable = false;
   const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    let entries;
+    try { entries = readdirSync(directory, { withFileTypes: true }); } catch { unavailable = true; return; }
+    for (const entry of entries) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) visit(path);
       else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(path);
     }
   };
   visit(root);
-  return files;
+  return { files, readable, unavailable };
 }
 
 function projectRoots(cwd: string): string[] {
@@ -169,7 +179,7 @@ function projectRoots(cwd: string): string[] {
   for (;;) {
     if (existsSync(join(root, ".git"))) break;
     const parent = resolve(root, "..");
-    if (parent === root) return [resolve(cwd)];
+    if (parent === root) return [join(resolve(cwd), ".claude", "skills")];
     root = parent;
   }
   const roots: string[] = [];
@@ -237,15 +247,35 @@ function scanSession(path: string, skills: Map<string, Skill>): number {
 export function scanClaude(cwd = process.cwd(), home = homedir()): ClaudeScan {
   const skills = new Map<string, Skill>();
   const warnings: string[] = [];
-  for (const file of skillFiles(join(home, ".claude", "skills"))) addAvailableSkill(skills, file, "global");
-  for (const root of projectRoots(cwd)) {
-    for (const file of skillFiles(root)) addAvailableSkill(skills, file, "project");
+  const roots = [join(home, ".claude", "skills"), ...projectRoots(cwd)];
+  let inventoryReadable = roots.some(readableDirectory);
+  let readableInventoryFile = false;
+  let unreadableInventoryFile = false;
+  if (roots.some((root) => existsSync(root) && !readableDirectory(root))) warnings.push("Claude Skill inventory is partially unavailable.");
+  for (const file of skillFiles(roots[0])) {
+    const readable = addAvailableSkill(skills, file, "global", undefined, undefined, warnings);
+    readableInventoryFile ||= readable;
+    unreadableInventoryFile ||= !readable;
   }
-  if (parsePluginSkills(skills, warnings) || claudeAvailable()) addSystemSkills(skills);
+  for (const root of roots.slice(1)) for (const file of skillFiles(root)) {
+    const readable = addAvailableSkill(skills, file, "project", undefined, undefined, warnings);
+    readableInventoryFile ||= readable;
+    unreadableInventoryFile ||= !readable;
+  }
+  const pluginInventoryReadable = parsePluginSkills(skills, warnings);
+  if (unreadableInventoryFile && !readableInventoryFile && !pluginInventoryReadable) inventoryReadable = false;
+  if (pluginInventoryReadable || claudeAvailable()) addSystemSkills(skills);
 
   let corrupt = 0;
-  for (const path of sessionFiles(join(home, ".claude", "projects"))) corrupt += scanSession(path, skills);
-  for (const path of sessionFiles(join(home, ".claude", "archived_sessions"))) corrupt += scanSession(path, skills);
+  const histories = [sessionFiles(join(home, ".claude", "projects")), sessionFiles(join(home, ".claude", "archived_sessions"))];
+  let unavailableHistory = histories.some((history) => history.unavailable);
+  let historyFiles = 0;
+  let readableHistoryFile = false;
+  for (const history of histories) for (const path of history.files) {
+    historyFiles += 1;
+    try { corrupt += scanSession(path, skills); readableHistoryFile = true; } catch { unavailableHistory = true; }
+  }
+  if (unavailableHistory) warnings.push("Claude Usage History is partially unavailable.");
   if (corrupt) warnings.push(`Claude skipped ${corrupt} malformed session record${corrupt === 1 ? "" : "s"}.`);
 
   return {
@@ -259,6 +289,7 @@ export function scanClaude(cwd = process.cwd(), home = homedir()): ClaudeScan {
         name: skill.name, source: skill.source, total
       };
     }).sort((left, right) => right.total - left.total || left.name.localeCompare(right.name)),
+    historyReadable: histories.some((history) => history.readable) && (!historyFiles || readableHistoryFile), inventoryReadable: inventoryReadable || pluginInventoryReadable,
     warnings
   };
 }

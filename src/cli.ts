@@ -71,6 +71,10 @@ export function main(args = process.argv.slice(2)): number {
   }
 
   const scan = aggregate(options.agent);
+  if (!scan.hasReadableData) {
+    console.error("No readable Skill inventory or Usage History found.");
+    return 1;
+  }
   console.log(JSON.stringify({
     schemaVersion: 1,
     scope: options.agent,

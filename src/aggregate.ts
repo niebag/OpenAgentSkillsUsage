@@ -19,7 +19,7 @@ export type AggregateSkill = {
   total: number;
 };
 
-export type AggregateScan = { skills: AggregateSkill[]; warnings: string[] };
+export type AggregateScan = { hasReadableData: boolean; skills: AggregateSkill[]; warnings: string[] };
 
 function agentOf(skill: Skill): Agent {
   return skill.members[0];
@@ -83,5 +83,8 @@ export function aggregate(scope: Scope): AggregateScan {
   disambiguate(skills);
   skills.sort((left, right) => right.total - left.total || left.name.localeCompare(right.name)
     || (left.sourceHint ?? "").localeCompare(right.sourceHint ?? "") || left.id.localeCompare(right.id));
-  return { skills, warnings: selectedAgents.flatMap((agent) => scans[agent].warnings) };
+  return {
+    hasReadableData: selectedAgents.some((agent) => scans[agent].inventoryReadable || scans[agent].historyReadable),
+    skills, warnings: selectedAgents.flatMap((agent) => scans[agent].warnings)
+  };
 }

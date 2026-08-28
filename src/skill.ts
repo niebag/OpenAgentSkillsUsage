@@ -40,16 +40,40 @@ export function skillFiles(root: string, excluded = new Set<string>()): string[]
   const files: string[] = [];
   const visited = new Set<string>();
   const visit = (directory: string): void => {
-    const canonicalDirectory = realpathSync(directory);
+    let canonicalDirectory: string;
+    let entries;
+    try {
+      canonicalDirectory = realpathSync(directory);
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
     if (visited.has(canonicalDirectory) || excluded.has(canonicalDirectory)) return;
     visited.add(canonicalDirectory);
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entries) {
       const path = join(directory, entry.name);
-      const target = entry.isSymbolicLink() && existsSync(path) ? statSync(path) : entry;
-      if (target.isDirectory()) visit(path);
-      else if (target.isFile() && entry.name === "SKILL.md") files.push(path);
+      let isDirectory = entry.isDirectory();
+      let isFile = entry.isFile();
+      try {
+        if (entry.isSymbolicLink() && existsSync(path)) {
+          const target = statSync(path);
+          isDirectory = target.isDirectory();
+          isFile = target.isFile();
+        }
+      } catch { continue; }
+      if (isDirectory) visit(path);
+      else if (isFile && entry.name === "SKILL.md") files.push(path);
     }
   };
   visit(root);
   return files;
+}
+
+export function readableDirectory(path: string): boolean {
+  try {
+    readdirSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }

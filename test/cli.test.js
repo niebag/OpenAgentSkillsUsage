@@ -25,14 +25,121 @@ test("CLI exposes the v1 contract", () => {
   assert.equal(version.status, 0);
   assert.equal(version.stdout.trim(), "0.1.0");
 
-  const json = run(options, "--json");
-  assert.equal(json.status, 0);
-  assert.deepEqual(JSON.parse(json.stdout).skills, []);
-
   const invalid = run(options, "--nope");
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /Unknown option/);
   rmSync(root, { recursive: true });
+});
+
+test("CLI returns partial data without agent commands", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentskillsusage-"));
+  const home = join(root, "home");
+  const codexHome = join(root, "codex");
+  const skill = (directory, name) => {
+    mkdirSync(join(directory, name), { recursive: true });
+    writeFileSync(join(directory, name, "SKILL.md"), `---\nname: ${name}\n---\n`);
+  };
+  skill(join(home, ".agents", "skills"), "codex-global");
+  skill(join(home, ".claude", "skills"), "claude-global");
+  mkdirSync(join(codexHome, "sessions"), { recursive: true });
+  mkdirSync(join(home, ".claude", "projects"), { recursive: true });
+  writeFileSync(join(codexHome, "sessions", "session.jsonl"), [
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "$codex-global", text_elements: [{ placeholder: "$codex-global" }] } }),
+    "{bad json}"
+  ].join("\n"));
+  writeFileSync(join(home, ".claude", "projects", "session.jsonl"), [
+    JSON.stringify({ uuid: "claude-turn", type: "user", message: { content: "/claude-global" } }),
+    "{bad json}"
+  ].join("\n"));
+
+  t.after(() => rmSync(root, { recursive: true }));
+  const result = run({
+    cwd: root, env: { ...process.env, HOME: home, CODEX_HOME: codexHome, PATH: join(root, "missing-bin") }
+  }, "--json");
+  assert.equal(result.status, 0);
+  const json = JSON.parse(result.stdout);
+  assert.deepEqual(json.skills.map((entry) => entry.name), ["claude-global", "codex-global"]);
+  assert.match(json.warnings.join("\n"), /Codex plugin inventory is unavailable/);
+  assert.match(json.warnings.join("\n"), /Claude plugin inventory is unavailable/);
+  assert.match(json.warnings.join("\n"), /Codex skipped 1 malformed session record/);
+  assert.match(json.warnings.join("\n"), /Claude skipped 1 malformed session record/);
+  assert.equal(result.stderr, "");
+});
+
+test("CLI fails only when no inventory or history is readable", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentskillsusage-"));
+  const home = join(root, "home");
+  const codexHome = join(root, "codex");
+  const skill = (directory, name) => {
+    mkdirSync(join(directory, name), { recursive: true });
+    writeFileSync(join(directory, name, "SKILL.md"), `---\nname: ${name}\n---\n`);
+  };
+  skill(join(home, ".agents", "skills"), "available");
+
+  t.after(() => rmSync(root, { recursive: true }));
+  const inventoryOnly = run({
+    cwd: root, env: { ...process.env, HOME: home, CODEX_HOME: codexHome, PATH: join(root, "missing-bin") }
+  }, "--json", "--agent", "codex");
+  assert.equal(inventoryOnly.status, 0);
+  assert.equal(JSON.parse(inventoryOnly.stdout).skills[0].name, "available");
+
+  const unavailable = run({
+    cwd: root, env: { ...process.env, HOME: join(root, "empty-home"), CODEX_HOME: join(root, "empty-codex"), PATH: join(root, "missing-bin") }
+  }, "--json");
+  assert.equal(unavailable.status, 1);
+  assert.equal(unavailable.stdout, "");
+  assert.match(unavailable.stderr, /No readable Skill inventory or Usage History/);
+});
+
+test("CLI skips unreadable local files with safe warnings", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentskillsusage-"));
+  const home = join(root, "home");
+  const codexHome = join(root, "codex");
+  const skill = (name) => {
+    const path = join(home, ".agents", "skills", name, "SKILL.md");
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, `---\nname: ${name}\n---\n`);
+    return path;
+  };
+  skill("available");
+  const unavailableSkill = skill("unavailable");
+  const sessions = join(codexHome, "sessions");
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(join(sessions, "available.jsonl"), JSON.stringify({
+    type: "event_msg", payload: { type: "user_message", message: "$available", text_elements: [{ placeholder: "$available" }] }
+  }));
+  const unavailableHistory = join(sessions, "unavailable.jsonl");
+  writeFileSync(unavailableHistory, "{}");
+  chmodSync(unavailableSkill, 0);
+  chmodSync(unavailableHistory, 0);
+
+  t.after(() => rmSync(root, { recursive: true }));
+  const result = run({
+    cwd: root, env: { ...process.env, HOME: home, CODEX_HOME: codexHome, PATH: join(root, "missing-bin") }
+  }, "--json", "--agent", "codex");
+  assert.equal(result.status, 0);
+  const json = JSON.parse(result.stdout);
+  assert.equal(json.skills.find((entry) => entry.name === "available").total, 1);
+  assert.match(json.warnings.join("\n"), /Codex skipped an unreadable Skill file/);
+  assert.match(json.warnings.join("\n"), /Codex Usage History is partially unavailable/);
+  assert.doesNotMatch(json.warnings.join("\n"), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const unusableHome = join(root, "unusable-home");
+  const unusableCodexHome = join(root, "unusable-codex");
+  const unusableSkill = join(unusableHome, ".agents", "skills", "unavailable", "SKILL.md");
+  const unusableSession = join(unusableCodexHome, "sessions", "unavailable.jsonl");
+  mkdirSync(join(unusableSkill, ".."), { recursive: true });
+  mkdirSync(join(unusableSession, ".."), { recursive: true });
+  writeFileSync(unusableSkill, "---\nname: unavailable\n---\n");
+  writeFileSync(unusableSession, "{}");
+  chmodSync(unusableSkill, 0);
+  chmodSync(unusableSession, 0);
+  const unavailable = run({
+    cwd: root, env: { ...process.env, HOME: unusableHome, CODEX_HOME: unusableCodexHome, PATH: join(root, "missing-bin") }
+  }, "--json", "--agent", "codex");
+  assert.equal(unavailable.status, 1);
+  assert.equal(unavailable.stdout, "");
+  assert.match(unavailable.stderr, /No readable Skill inventory or Usage History/);
 });
 
 test("--json --agent claude inventories skills and deduplicates session evidence", (t) => {

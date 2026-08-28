@@ -5,7 +5,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
   findSkillByIdentity, installationIdentities, preferredSkillIdentity, skillFiles, skillId, skillIdentity,
-  skillIdentityMap, type SkillIdentity
+  readableDirectory, skillIdentityMap, type SkillIdentity
 } from "./skill.js";
 
 type InvocationKind = "explicit" | "agent" | "inferred";
@@ -35,7 +35,7 @@ export type CodexSkill = {
   total: number;
 };
 
-export type CodexScan = { skills: CodexSkill[]; warnings: string[] };
+export type CodexScan = { historyReadable: boolean; inventoryReadable: boolean; skills: CodexSkill[]; warnings: string[] };
 
 const precedence: Record<InvocationKind, number> = { inferred: 1, agent: 2, explicit: 3 };
 
@@ -45,28 +45,34 @@ function skillName(path: string): string {
 }
 
 function addAvailableSkill(
-  skills: Map<string, Skill>, path: string, source: Source, namespace?: string, identity?: string
-): void {
-  const canonical = realpathSync(path);
-  const identities = installationIdentities(canonical, identity);
-  const localName = skillName(canonical);
-  const name = namespace ? `${namespace}:${localName}` : localName;
-  const skill = findSkillByIdentity(skills.values(), identities) ?? (() => {
-    const id = skillId(preferredSkillIdentity(identities).key);
-    const created: Skill = {
-      aliases: new Set<string>(), available: true,
-      byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id, name,
-      identities: new Map<string, SkillIdentity>(), paths: new Set<string>(), source,
-      uses: new Map<string, InvocationKind>()
-    };
-    skills.set(id, created);
-    return created;
-  })();
-  skill.aliases.add(name);
-  skill.aliases.add(localName);
-  for (const value of identities) skill.identities.set(value.key, value);
-  skill.paths.add(path);
-  skill.paths.add(canonical);
+  skills: Map<string, Skill>, path: string, source: Source, namespace?: string, identity?: string, warnings?: string[]
+): boolean {
+  try {
+    const canonical = realpathSync(path);
+    const identities = installationIdentities(canonical, identity);
+    const localName = skillName(canonical);
+    const name = namespace ? `${namespace}:${localName}` : localName;
+    const skill = findSkillByIdentity(skills.values(), identities) ?? (() => {
+      const id = skillId(preferredSkillIdentity(identities).key);
+      const created: Skill = {
+        aliases: new Set<string>(), available: true,
+        byInvocationKind: { explicit: 0, agent: 0, inferred: 0 }, id, name,
+        identities: new Map<string, SkillIdentity>(), paths: new Set<string>(), source,
+        uses: new Map<string, InvocationKind>()
+      };
+      skills.set(id, created);
+      return created;
+    })();
+    skill.aliases.add(name);
+    skill.aliases.add(localName);
+    for (const value of identities) skill.identities.set(value.key, value);
+    skill.paths.add(path);
+    skill.paths.add(canonical);
+    return true;
+  } catch {
+    warnings?.push("Codex skipped an unreadable Skill file.");
+    return false;
+  }
 }
 
 function recordUse(skill: Skill, turn: string, kind: InvocationKind): void {
@@ -167,24 +173,28 @@ function parsePluginSkills(skills: Map<string, Skill>, warnings: string[], codex
     for (const file of skillFiles(join(root, "skills"))) {
       const identity = typeof plugin.pluginId === "string"
         ? `plugin:${plugin.pluginId}:${relative(root, file)}` : undefined;
-      addAvailableSkill(skills, file, "plugin", plugin.name, identity);
+      addAvailableSkill(skills, file, "plugin", plugin.name, identity, warnings);
     }
   }
   return pluginRoots;
 }
 
-function sessionFiles(root: string): string[] {
-  if (!existsSync(root)) return [];
+function sessionFiles(root: string): { files: string[]; readable: boolean; unavailable: boolean } {
+  const readable = readableDirectory(root);
+  if (!readable) return { files: [], readable, unavailable: existsSync(root) };
   const files: string[] = [];
+  let unavailable = false;
   const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    let entries;
+    try { entries = readdirSync(directory, { withFileTypes: true }); } catch { unavailable = true; return; }
+    for (const entry of entries) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) visit(path);
       else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(path);
     }
   };
   visit(root);
-  return files;
+  return { files, readable, unavailable };
 }
 
 function* lines(path: string): Iterable<string> {
@@ -308,21 +318,50 @@ export function scanCodex(
 ): CodexScan {
   const skills = new Map<string, Skill>();
   const warnings: string[] = [];
-  for (const file of skillFiles(join(home, ".agents", "skills"))) addAvailableSkill(skills, file, "global");
+  const roots = [join(home, ".agents", "skills")];
   const systemRoot = join(codexHome, "skills", ".system");
-  const excluded = existsSync(systemRoot) ? new Set([realpathSync(systemRoot)]) : undefined;
-  for (const file of skillFiles(join(codexHome, "skills"), excluded)) addAvailableSkill(skills, file, "global");
-  for (const file of skillFiles(systemRoot)) addAvailableSkill(skills, file, "system");
-  for (const root of projectRoots(cwd)) {
-    for (const file of skillFiles(root)) addAvailableSkill(skills, file, "project");
+  roots.push(join(codexHome, "skills"), systemRoot, ...projectRoots(cwd));
+  let inventoryReadable = roots.some(readableDirectory);
+  let readableInventoryFile = false;
+  let unreadableInventoryFile = false;
+  if (roots.some((root) => existsSync(root) && !readableDirectory(root))) warnings.push("Codex Skill inventory is partially unavailable.");
+  for (const file of skillFiles(roots[0])) {
+    const readable = addAvailableSkill(skills, file, "global", undefined, undefined, warnings);
+    readableInventoryFile ||= readable;
+    unreadableInventoryFile ||= !readable;
+  }
+  const excluded = readableDirectory(systemRoot) ? new Set([realpathSync(systemRoot)]) : undefined;
+  for (const file of skillFiles(join(codexHome, "skills"), excluded)) {
+    const readable = addAvailableSkill(skills, file, "global", undefined, undefined, warnings);
+    readableInventoryFile ||= readable;
+    unreadableInventoryFile ||= !readable;
+  }
+  for (const file of skillFiles(systemRoot)) {
+    const readable = addAvailableSkill(skills, file, "system", undefined, undefined, warnings);
+    readableInventoryFile ||= readable;
+    unreadableInventoryFile ||= !readable;
+  }
+  for (const root of roots.slice(3)) {
+    for (const file of skillFiles(root)) {
+      const readable = addAvailableSkill(skills, file, "project", undefined, undefined, warnings);
+      readableInventoryFile ||= readable;
+      unreadableInventoryFile ||= !readable;
+    }
   }
   const pluginRoots = parsePluginSkills(skills, warnings, codexHome);
+  if (unreadableInventoryFile && !readableInventoryFile && !pluginRoots.size) inventoryReadable = false;
+  inventoryReadable ||= pluginRoots.size > 0;
 
   let corrupt = 0;
-  for (const path of sessionFiles(join(codexHome, "sessions"))) corrupt += scanSession(path, skills, codexHome, pluginRoots);
-  for (const path of sessionFiles(join(codexHome, "archived_sessions"))) {
-    corrupt += scanSession(path, skills, codexHome, pluginRoots);
+  const histories = [sessionFiles(join(codexHome, "sessions")), sessionFiles(join(codexHome, "archived_sessions"))];
+  let unavailableHistory = histories.some((history) => history.unavailable);
+  let historyFiles = 0;
+  let readableHistoryFile = false;
+  for (const history of histories) for (const path of history.files) {
+    historyFiles += 1;
+    try { corrupt += scanSession(path, skills, codexHome, pluginRoots); readableHistoryFile = true; } catch { unavailableHistory = true; }
   }
+  if (unavailableHistory) warnings.push("Codex Usage History is partially unavailable.");
   if (corrupt) warnings.push(`Codex skipped ${corrupt} malformed session record${corrupt === 1 ? "" : "s"}.`);
 
   return {
@@ -336,6 +375,7 @@ export function scanCodex(
         name: skill.name, source: skill.source, total
       };
     }).sort((left, right) => right.total - left.total || left.name.localeCompare(right.name)),
+    historyReadable: histories.some((history) => history.readable) && (!historyFiles || readableHistoryFile), inventoryReadable,
     warnings
   };
 }
