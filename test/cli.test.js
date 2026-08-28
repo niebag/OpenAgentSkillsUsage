@@ -40,6 +40,7 @@ test("npm artifact contains only the published runtime and documentation", (t) =
   assert.equal(result.status, 0, result.stderr);
   const files = JSON.parse(result.stdout)[0].files.map((entry) => entry.path).sort();
   assert.deepEqual(files, [
+    "LICENSE",
     "README.md",
     "dist/aggregate.js",
     "dist/claude.js",
