@@ -1,7 +1,7 @@
 {
   "name": "openagentskillsusage",
-  "version": "0.1.0",
-  "description": "A local read-only overview of Agent Skill usage",
+  "version": "0.1.1",
+  "description": "Inspect local Agent Skill usage",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/niebag/OpenAgentSkillsUsage.git"

@@ -23,7 +23,7 @@ test("CLI exposes the v1 contract", () => {
 
   const version = run(options, "--version");
   assert.equal(version.status, 0);
-  assert.equal(version.stdout.trim(), "0.1.0");
+  assert.equal(version.stdout.trim(), "0.1.1");
 
   const invalid = run(options, "--nope");
   assert.equal(invalid.status, 1);
@@ -86,7 +86,7 @@ test("installed npm artifact exposes both executable names", (t) => {
       env: { ...process.env, HOME: home, PATH: `${join(root, "node_modules", ".bin")}:${process.env.PATH}` }
     };
     assert.equal(spawnSync(path, ["--help"], { ...options, encoding: "utf8" }).status, 0);
-    assert.equal(spawnSync(path, ["--version"], { ...options, encoding: "utf8" }).stdout.trim(), "0.1.0");
+    assert.equal(spawnSync(path, ["--version"], { ...options, encoding: "utf8" }).stdout.trim(), "0.1.1");
     const json = spawnSync(path, ["--json"], { ...options, encoding: "utf8" });
     assert.equal(json.status, 0);
     assert.equal(JSON.parse(json.stdout).skills.find((entry) => entry.name === "fixture").name, "fixture");
