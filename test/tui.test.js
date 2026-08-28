@@ -19,8 +19,11 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
   const app = render(React.createElement(UsageTui, { initialScope: "all", initialScan: scan("all"), scan, height: 4, onQuit: () => { quit = true; } }));
 
   assert.match(app.lastFrame(), /All/);
+  assert.match(app.lastFrame(), /Open Agent Skills Usage/);
+  assert.match(app.lastFrame(), /8 uses · 2 skills/);
+  assert.match(app.lastFrame(), /╭.*╮/);
   assert.match(app.lastFrame(), /alpha/);
-  assert.match(app.lastFrame(), /inferred/);
+  assert.match(app.lastFrame(), /INFERRED/);
   app.stdin.write("\u001B[C");
   await new Promise(setImmediate);
   assert.match(app.lastFrame(), /Codex/);
