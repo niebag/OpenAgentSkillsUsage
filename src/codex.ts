@@ -314,8 +314,10 @@ function scanSession(path: string, skills: Map<string, Skill>, codexHome: string
 export function scanCodex(
   cwd = process.cwd(),
   home = homedir(),
-  codexHome = process.env.CODEX_HOME || join(home, ".codex")
+  codexHome = process.env.CODEX_HOME || join(home, ".codex"),
+  onProgress?: (percent: number) => void
 ): CodexScan {
+  onProgress?.(0);
   const skills = new Map<string, Skill>();
   const warnings: string[] = [];
   const roots = [join(home, ".agents", "skills")];
@@ -351,16 +353,19 @@ export function scanCodex(
   const pluginRoots = parsePluginSkills(skills, warnings, codexHome);
   if (unreadableInventoryFile && !readableInventoryFile && !pluginRoots.size) inventoryReadable = false;
   inventoryReadable ||= pluginRoots.size > 0;
+  onProgress?.(10);
 
   let corrupt = 0;
   const histories = [sessionFiles(join(codexHome, "sessions")), sessionFiles(join(codexHome, "archived_sessions"))];
   let unavailableHistory = histories.some((history) => history.unavailable);
-  let historyFiles = 0;
+  const historyPaths = histories.flatMap((history) => history.files);
+  const historyFiles = historyPaths.length;
   let readableHistoryFile = false;
-  for (const history of histories) for (const path of history.files) {
-    historyFiles += 1;
+  for (const [index, path] of historyPaths.entries()) {
     try { corrupt += scanSession(path, skills, codexHome, pluginRoots); readableHistoryFile = true; } catch { unavailableHistory = true; }
+    onProgress?.(10 + 90 * (index + 1) / historyFiles);
   }
+  if (!historyFiles) onProgress?.(100);
   if (unavailableHistory) warnings.push("Codex Usage History is partially unavailable.");
   if (corrupt) warnings.push(`Codex skipped ${corrupt} malformed session record${corrupt === 1 ? "" : "s"}.`);
 

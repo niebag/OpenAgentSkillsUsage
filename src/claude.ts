@@ -244,7 +244,8 @@ function scanSession(path: string, skills: Map<string, Skill>): number {
   return corrupt;
 }
 
-export function scanClaude(cwd = process.cwd(), home = homedir()): ClaudeScan {
+export function scanClaude(cwd = process.cwd(), home = homedir(), onProgress?: (percent: number) => void): ClaudeScan {
+  onProgress?.(0);
   const skills = new Map<string, Skill>();
   const warnings: string[] = [];
   const roots = [join(home, ".claude", "skills"), ...projectRoots(cwd)];
@@ -265,16 +266,19 @@ export function scanClaude(cwd = process.cwd(), home = homedir()): ClaudeScan {
   const pluginInventoryReadable = parsePluginSkills(skills, warnings);
   if (unreadableInventoryFile && !readableInventoryFile && !pluginInventoryReadable) inventoryReadable = false;
   if (pluginInventoryReadable || claudeAvailable()) addSystemSkills(skills);
+  onProgress?.(10);
 
   let corrupt = 0;
   const histories = [sessionFiles(join(home, ".claude", "projects")), sessionFiles(join(home, ".claude", "archived_sessions"))];
   let unavailableHistory = histories.some((history) => history.unavailable);
-  let historyFiles = 0;
+  const historyPaths = histories.flatMap((history) => history.files);
+  const historyFiles = historyPaths.length;
   let readableHistoryFile = false;
-  for (const history of histories) for (const path of history.files) {
-    historyFiles += 1;
+  for (const [index, path] of historyPaths.entries()) {
     try { corrupt += scanSession(path, skills); readableHistoryFile = true; } catch { unavailableHistory = true; }
+    onProgress?.(10 + 90 * (index + 1) / historyFiles);
   }
+  if (!historyFiles) onProgress?.(100);
   if (unavailableHistory) warnings.push("Claude Usage History is partially unavailable.");
   if (corrupt) warnings.push(`Claude skipped ${corrupt} malformed session record${corrupt === 1 ? "" : "s"}.`);
 

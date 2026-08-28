@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput } from "ink";
-import type { AggregateScan, AggregateSkill, Scope } from "./aggregate.js";
+import type { AggregateScan, AggregateSkill, ScanProgress, Scope } from "./aggregate.js";
 import { scanInWorker, type ScanTask } from "./scan.js";
 
 type Scan = (scope: Scope) => ScanTask;
@@ -20,6 +20,11 @@ function summary(scan: AggregateScan): string {
   return `${uses} uses · ${scan.skills.length} skills${scan.warnings.length ? ` · ${scan.warnings.length} warnings` : ""}`;
 }
 
+function progressBar(percent: number): string {
+  const filled = Math.round(percent / 5);
+  return `[${"█".repeat(filled)}${"·".repeat(20 - filled)}] ${percent}%`;
+}
+
 export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 24, onQuit }: {
   initialScope: Scope;
   scan: Scan;
@@ -27,8 +32,8 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
   onQuit?: () => void;
 }): React.JSX.Element {
   const { exit } = useApp();
-  const [view, setView] = useState<{ error?: string; loading: boolean; offset: number; result?: AggregateScan; scope: Scope }>({
-    loading: true, offset: 0, scope: initialScope
+  const [view, setView] = useState<{ error?: string; loading: boolean; offset: number; progress?: ScanProgress; result?: AggregateScan; scope: Scope }>({
+    loading: true, offset: 0, progress: { label: "Preparing scan", percent: 0 }, scope: initialScope
   });
   const scopeRef = useRef(initialScope);
   const scanRef = useRef(0);
@@ -40,16 +45,21 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
     const request = ++scanRef.current;
     activeScanRef.current?.cancel();
     scopeRef.current = scope;
-    setView({ loading: true, offset: 0, scope });
+    setView({ loading: true, offset: 0, progress: { label: "Preparing scan", percent: 0 }, scope });
     const task = scan(scope);
     activeScanRef.current = task;
+    const stopProgress = task.onProgress((progress) => {
+      if (scanRef.current === request) setView((current) => ({ ...current, progress }));
+    });
     void task.result.then((result) => {
       if (scanRef.current === request) {
+        stopProgress();
         activeScanRef.current = undefined;
         setView({ loading: false, offset: 0, result, scope });
       }
     }, () => {
       if (scanRef.current === request) {
+        stopProgress();
         activeScanRef.current = undefined;
         setView({ error: "Scan failed. Press r to retry.", loading: false, offset: 0, scope });
       }
@@ -81,7 +91,7 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
   return React.createElement(Box, { borderColor: "cyan", borderStyle: "round", flexDirection: "column", paddingX: 1 },
     React.createElement(Box, { justifyContent: "space-between" },
       React.createElement(Text, { bold: true, color: "cyan" }, "Open Agent Skills Usage"),
-      React.createElement(Text, { dimColor: true }, view.loading ? "Scanning local Skill usage..." : view.error ?? summary(view.result!))
+      React.createElement(Text, { dimColor: true }, view.loading ? progressBar(view.progress?.percent ?? 0) : view.error ?? summary(view.result!))
     ),
     React.createElement(Box, null,
       React.createElement(Text, { dimColor: true }, "Scope  "),
@@ -91,7 +101,7 @@ export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 2
       ])
     ),
     React.createElement(Text, { dimColor: true }, "SKILL                         USAGE          TOTAL  EXPLICIT AGENT INFERRED"),
-    view.loading || view.error ? React.createElement(Text, { dimColor: true }, view.loading ? "Loading..." : view.error) : null,
+    view.loading || view.error ? React.createElement(Text, { dimColor: true }, view.loading ? view.progress?.label : view.error) : null,
     ...rows.map((skill) => React.createElement(Text, { key: skill.id },
       `${skill.name.slice(0, 29).padEnd(29)} `,
       React.createElement(Text, { color: skill.total ? "cyan" : undefined, dimColor: !skill.total }, bar(skill, maximum).padEnd(12)),

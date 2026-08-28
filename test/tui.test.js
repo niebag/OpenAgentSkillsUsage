@@ -12,12 +12,17 @@ const skills = [
 test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () => {
   const scans = [];
   const pending = [];
+  const progressListeners = [];
   let cancelled = 0;
   let quit = false;
   const scan = (scope) => {
     scans.push(scope);
     return {
       cancel: () => { cancelled += 1; },
+      onProgress: (listener) => {
+        progressListeners.push(listener);
+        return () => {};
+      },
       result: new Promise((resolve) => pending.push(() => resolve({
         hasReadableData: true, skills: scope === "claude" ? [...skills].reverse() : skills, warnings: []
       })))
@@ -26,8 +31,12 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
   const app = render(React.createElement(UsageTui, { initialScope: "all", scan, height: 4, onQuit: () => { quit = true; } }));
 
   await new Promise(setImmediate);
-  assert.match(app.lastFrame(), /Scanning local Skill usage/);
+  assert.match(app.lastFrame(), /Preparing scan/);
   assert.deepEqual(scans, ["all"]);
+  progressListeners[0]({ label: "Scanning Codex history", percent: 42 });
+  await new Promise(setImmediate);
+  assert.match(app.lastFrame(), /42%/);
+  assert.match(app.lastFrame(), /Scanning Codex history/);
   pending.shift()();
   await new Promise(setImmediate);
 
@@ -39,13 +48,13 @@ test("TUI shows usage, switches scope, rescans, scrolls, and quits", async () =>
   assert.match(app.lastFrame(), /INFERRED/);
   app.stdin.write("\u001B[C");
   await new Promise(setImmediate);
-  assert.match(app.lastFrame(), /Scanning local Skill usage/);
+  assert.match(app.lastFrame(), /0%/);
   app.stdin.write("\u001B[C");
   await new Promise(setImmediate);
   assert.equal(cancelled, 1);
   pending.shift()();
   await new Promise(setImmediate);
-  assert.match(app.lastFrame(), /Scanning local Skill usage/);
+  assert.match(app.lastFrame(), /0%/);
   pending.shift()();
   await new Promise(setImmediate);
   await new Promise(setImmediate);
