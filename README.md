@@ -73,6 +73,23 @@ npx openagentskillsusage
 
 Use the arrow keys to change the Agent scope and move through the Skill list. Page Up and Page Down jump by a page. Press `r` to rescan local data, or `q` or Escape to quit.
 
+Example output uses fictional Skill names:
+
+```text
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Open Agent Skills Usage                                                  133 uses · 6 skills │
+│ Scope   [All]   Codex   Claude                                                               │
+│ SKILL                         USAGE          TOTAL  EXPLICIT AGENT INFERRED                  │
+│ brief-builder                 ████████████      48         4     7       37                  │
+│ repo-checker                  ████████          31         1     6       24                  │
+│ test-runner                   ██████            24         3     2       19                  │
+│ release-notes                 █████             18         0     4       14                  │
+│ docs-helper                   ███               12         2     1        9                  │
+│ unused-example                ·                  0         0     0        0                  │
+│ ←→ scope  ↑↓ scroll  PgUp/PgDn page  r rescan  q/Esc quit                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
 Choose the initial scope with `--agent all`, `--agent codex`, or `--agent claude`. Use `--json` for scripts and environments without a TTY:
 
 ```sh
