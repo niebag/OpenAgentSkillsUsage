@@ -31,6 +31,65 @@ test("CLI exposes the v1 contract", () => {
   rmSync(root, { recursive: true });
 });
 
+test("npm artifact contains only the published runtime and documentation", (t) => {
+  const cache = mkdtempSync(join(tmpdir(), "agentskillsusage-npm-cache-"));
+  t.after(() => rmSync(cache, { recursive: true }));
+  const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+    encoding: "utf8", env: { ...process.env, npm_config_cache: cache }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const files = JSON.parse(result.stdout)[0].files.map((entry) => entry.path).sort();
+  assert.deepEqual(files, [
+    "README.md",
+    "dist/aggregate.js",
+    "dist/claude.js",
+    "dist/cli.js",
+    "dist/codex.js",
+    "dist/skill.js",
+    "dist/tui.js",
+    "package.json"
+  ]);
+});
+
+test("installed npm artifact exposes both executable names", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentskillsusage-pack-"));
+  const cache = mkdtempSync(join(tmpdir(), "agentskillsusage-npm-cache-"));
+  const home = join(root, "home");
+  mkdirSync(join(home, ".agents", "skills", "fixture"), { recursive: true });
+  writeFileSync(join(home, ".agents", "skills", "fixture", "SKILL.md"), "---\nname: fixture\n---\n");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  for (const dependency of ["ink", "react"]) {
+    symlinkSync(join(process.cwd(), "node_modules", dependency), join(root, "node_modules", dependency));
+  }
+  t.after(() => {
+    rmSync(root, { recursive: true });
+    rmSync(cache, { recursive: true });
+  });
+
+  const packed = spawnSync("npm", ["pack", "--ignore-scripts", "--pack-destination", root], {
+    encoding: "utf8", env: { ...process.env, npm_config_cache: cache }
+  });
+  assert.equal(packed.status, 0, packed.stderr);
+  const tarball = join(root, packed.stdout.trim());
+  const installed = spawnSync("npm", ["install", "--offline", "--ignore-scripts", "--no-package-lock", "--no-audit", "--no-fund", "--omit=prod", tarball], {
+    cwd: root, encoding: "utf8", env: { ...process.env, npm_config_cache: cache }
+  });
+  assert.equal(installed.status, 0, installed.stderr);
+
+  for (const executable of ["agentskillsusage", "openagentskillsusage"]) {
+    const path = join(root, "node_modules", ".bin", executable);
+    const options = {
+      cwd: root,
+      env: { ...process.env, HOME: home, PATH: `${join(root, "node_modules", ".bin")}:${process.env.PATH}` }
+    };
+    assert.equal(spawnSync(path, ["--help"], { ...options, encoding: "utf8" }).status, 0);
+    assert.equal(spawnSync(path, ["--version"], { ...options, encoding: "utf8" }).stdout.trim(), "0.1.0");
+    const json = spawnSync(path, ["--json"], { ...options, encoding: "utf8" });
+    assert.equal(json.status, 0);
+    assert.equal(JSON.parse(json.stdout).skills.find((entry) => entry.name === "fixture").name, "fixture");
+  }
+});
+
 test("CLI directs interactive startup without a TTY to JSON", (t) => {
   const root = mkdtempSync(join(tmpdir(), "agentskillsusage-"));
   t.after(() => rmSync(root, { recursive: true }));
