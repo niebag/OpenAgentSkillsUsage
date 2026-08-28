@@ -31,6 +31,14 @@ test("CLI exposes the v1 contract", () => {
   rmSync(root, { recursive: true });
 });
 
+test("CLI directs interactive startup without a TTY to JSON", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentskillsusage-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  const result = run({ cwd: root, env: { ...process.env, HOME: root, PATH: join(root, "bin") } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--json/);
+});
+
 test("CLI returns partial data without agent commands", (t) => {
   const root = mkdtempSync(join(tmpdir(), "agentskillsusage-"));
   const home = join(root, "home");

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import packageJson from "../package.json" with { type: "json" };
 import { aggregate } from "./aggregate.js";
+import { startTui } from "./tui.js";
 
 const version = packageJson.version;
 
@@ -65,7 +66,7 @@ export function main(args = process.argv.slice(2)): number {
     return 1;
   }
 
-  if (!options.json) {
+  if (!options.json && (!process.stdout.isTTY || !process.stdin.isTTY)) {
     console.error("Interactive mode requires a TTY; use --json instead.");
     return 2;
   }
@@ -74,6 +75,10 @@ export function main(args = process.argv.slice(2)): number {
   if (!scan.hasReadableData) {
     console.error("No readable Skill inventory or Usage History found.");
     return 1;
+  }
+  if (!options.json) {
+    startTui(options.agent, scan, aggregate);
+    return 0;
   }
   console.log(JSON.stringify({
     schemaVersion: 1,
