@@ -1,9 +1,9 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput } from "ink";
-import type { AggregateScan, AggregateSkill } from "./aggregate.js";
+import type { AggregateScan, AggregateSkill, Scope } from "./aggregate.js";
+import { scanInWorker, type ScanTask } from "./scan.js";
 
-type Scope = "all" | "codex" | "claude";
-type Scan = (scope: Scope) => AggregateScan;
+type Scan = (scope: Scope) => ScanTask;
 
 const scopes: Scope[] = ["all", "codex", "claude"];
 
@@ -20,40 +20,68 @@ function summary(scan: AggregateScan): string {
   return `${uses} uses · ${scan.skills.length} skills${scan.warnings.length ? ` · ${scan.warnings.length} warnings` : ""}`;
 }
 
-export function UsageTui({ initialScope, initialScan, scan, height = process.stdout.rows ?? 24, onQuit }: {
+export function UsageTui({ initialScope, scan, height = process.stdout.rows ?? 24, onQuit }: {
   initialScope: Scope;
-  initialScan: AggregateScan;
   scan: Scan;
   height?: number;
   onQuit?: () => void;
 }): React.JSX.Element {
   const { exit } = useApp();
-  const [view, setView] = useState({ scope: initialScope, result: initialScan, offset: 0 });
+  const [view, setView] = useState<{ error?: string; loading: boolean; offset: number; result?: AggregateScan; scope: Scope }>({
+    loading: true, offset: 0, scope: initialScope
+  });
   const scopeRef = useRef(initialScope);
+  const scanRef = useRef(0);
+  const activeScanRef = useRef<ScanTask | undefined>(undefined);
   const visible = Math.max(1, height - 6);
-  const maximum = Math.max(1, ...view.result.skills.map((skill) => skill.total));
-  const rows = view.result.skills.slice(view.offset, view.offset + visible);
+  const maximum = Math.max(1, ...(view.result?.skills.map((skill) => skill.total) ?? []));
+  const rows = view.result?.skills.slice(view.offset, view.offset + visible) ?? [];
+  const refresh = (scope: Scope) => {
+    const request = ++scanRef.current;
+    activeScanRef.current?.cancel();
+    scopeRef.current = scope;
+    setView({ loading: true, offset: 0, scope });
+    const task = scan(scope);
+    activeScanRef.current = task;
+    void task.result.then((result) => {
+      if (scanRef.current === request) {
+        activeScanRef.current = undefined;
+        setView({ loading: false, offset: 0, result, scope });
+      }
+    }, () => {
+      if (scanRef.current === request) {
+        activeScanRef.current = undefined;
+        setView({ error: "Scan failed. Press r to retry.", loading: false, offset: 0, scope });
+      }
+    });
+  };
+  useEffect(() => {
+    refresh(initialScope);
+    return () => {
+      scanRef.current += 1;
+      activeScanRef.current?.cancel();
+    };
+  }, []);
   const changeScope = (direction: number) => {
     const next = scopes[(scopes.indexOf(scopeRef.current) + direction + scopes.length) % scopes.length];
-    scopeRef.current = next;
-    setView({ scope: next, result: scan(next), offset: 0 });
+    refresh(next);
   };
 
   useInput((input, key) => {
-    if (input === "q" || key.escape) { onQuit?.(); exit(); }
+    if (input === "q" || key.escape) { scanRef.current += 1; activeScanRef.current?.cancel(); onQuit?.(); exit(); }
     else if (key.leftArrow) changeScope(-1);
     else if (key.rightArrow) changeScope(1);
-    else if (input === "r") setView({ scope: scopeRef.current, result: scan(scopeRef.current), offset: 0 });
-    else if (key.downArrow) setView((current) => ({ ...current, offset: Math.min(current.offset + 1, Math.max(0, current.result.skills.length - visible)) }));
+    else if (input === "r") refresh(scopeRef.current);
+    else if (key.downArrow) setView((current) => ({ ...current, offset: Math.min(current.offset + 1, Math.max(0, (current.result?.skills.length ?? 0) - visible)) }));
     else if (key.upArrow) setView((current) => ({ ...current, offset: Math.max(0, current.offset - 1) }));
-    else if (key.pageDown) setView((current) => ({ ...current, offset: Math.min(current.offset + visible, Math.max(0, current.result.skills.length - visible)) }));
+    else if (key.pageDown) setView((current) => ({ ...current, offset: Math.min(current.offset + visible, Math.max(0, (current.result?.skills.length ?? 0) - visible)) }));
     else if (key.pageUp) setView((current) => ({ ...current, offset: Math.max(0, current.offset - visible) }));
   });
 
   return React.createElement(Box, { borderColor: "cyan", borderStyle: "round", flexDirection: "column", paddingX: 1 },
     React.createElement(Box, { justifyContent: "space-between" },
       React.createElement(Text, { bold: true, color: "cyan" }, "Open Agent Skills Usage"),
-      React.createElement(Text, { dimColor: true }, summary(view.result))
+      React.createElement(Text, { dimColor: true }, view.loading ? "Scanning local Skill usage..." : view.error ?? summary(view.result!))
     ),
     React.createElement(Box, null,
       React.createElement(Text, { dimColor: true }, "Scope  "),
@@ -63,6 +91,7 @@ export function UsageTui({ initialScope, initialScan, scan, height = process.std
       ])
     ),
     React.createElement(Text, { dimColor: true }, "SKILL                         USAGE          TOTAL  EXPLICIT AGENT INFERRED"),
+    view.loading || view.error ? React.createElement(Text, { dimColor: true }, view.loading ? "Loading..." : view.error) : null,
     ...rows.map((skill) => React.createElement(Text, { key: skill.id },
       `${skill.name.slice(0, 29).padEnd(29)} `,
       React.createElement(Text, { color: skill.total ? "cyan" : undefined, dimColor: !skill.total }, bar(skill, maximum).padEnd(12)),
@@ -73,6 +102,6 @@ export function UsageTui({ initialScope, initialScan, scan, height = process.std
   );
 }
 
-export function startTui(initialScope: Scope, initialScan: AggregateScan, scan: Scan): void {
-  render(React.createElement(UsageTui, { initialScope, initialScan, scan }));
+export function startTui(initialScope: Scope): void {
+  render(React.createElement(UsageTui, { initialScope, scan: scanInWorker }));
 }

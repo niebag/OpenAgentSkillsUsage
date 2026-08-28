@@ -71,14 +71,14 @@ export function main(args = process.argv.slice(2)): number {
     return 2;
   }
 
+  if (!options.json) {
+    startTui(options.agent);
+    return 0;
+  }
   const scan = aggregate(options.agent);
   if (!scan.hasReadableData) {
     console.error("No readable Skill inventory or Usage History found.");
     return 1;
-  }
-  if (!options.json) {
-    startTui(options.agent, scan, aggregate);
-    return 0;
   }
   console.log(JSON.stringify({
     schemaVersion: 1,

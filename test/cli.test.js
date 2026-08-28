@@ -46,6 +46,8 @@ test("npm artifact contains only the published runtime and documentation", (t) =
     "dist/claude.js",
     "dist/cli.js",
     "dist/codex.js",
+    "dist/scan-worker.js",
+    "dist/scan.js",
     "dist/skill.js",
     "dist/tui.js",
     "package.json"

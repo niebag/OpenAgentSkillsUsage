@@ -4,7 +4,7 @@ import { preferredSkillIdentity, skillId } from "./skill.js";
 
 type Agent = "codex" | "claude";
 type InvocationKind = "explicit" | "agent" | "inferred";
-type Scope = "all" | Agent;
+export type Scope = "all" | Agent;
 type Skill = CodexSkill | ClaudeSkill;
 
 export type AggregateSkill = {
